@@ -239,17 +239,23 @@ class Worker(LocalOrDistributedWorkerBase):
         """
         # Profile the memory usage of the model and get the maximum number of
         # cache blocks that can be allocated with the remaining free memory.
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Before torch.cuda.empty_cache().")
         torch.cuda.empty_cache()
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Before torch.cuda.reset_peak_memory_stats().")
         torch.cuda.reset_peak_memory_stats()
 
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Before torch.cuda.mem_get_info().")
         free_memory_pre_profile, total_gpu_memory = torch.cuda.mem_get_info()
 
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Before memory_profiling context.")
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
                 self.baseline_snapshot,
                 weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
+
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: After memory_profiling context. Result active memory: {result.active_memory_increase}, peak: {result.torch_peak_increase}")
 
         self._assert_memory_footprint_increased_during_profiling()
 
