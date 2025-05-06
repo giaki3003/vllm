@@ -1497,6 +1497,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
     @torch.inference_mode()
     def capture_model(self, kv_caches: List[List[torch.Tensor]]) -> None:
+        print(f"[DEBUG CAPTURE_MODEL_ENTRY] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group}: ENTERING capture_model")
         """Cuda graph capture a model.
 
         Note that CUDA graph's performance gain is negligible if number
@@ -1585,6 +1586,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             else: # Not pipelined, so only one "stage" (virtual_engine 0)
                 stages_to_capture.append(0)
 
+            print(f"[DEBUG TYPE CHECK] type(range) before problematic print: {type(range)}")
+            print(f"[DEBUG TYPE CHECK] type(get_pp_group().rank_in_group) before problematic print: {type(get_pp_group().rank_in_group)}")
+            print(f"[DEBUG STAGES] In capture_model for worker rank {get_tensor_model_parallel_rank()}, current_worker_pp_rank: {get_pp_group().rank_in_group}, calculated stages_to_capture: {stages_to_capture}, total VEs: {list(range(self.parallel_config.pipeline_parallel_size))}")
             for virtual_engine in stages_to_capture:
                 # We need to not only iterate over batch sizes, but also whether
                 # to use inputs_embeds or not, hence we use the cartesian
@@ -1604,6 +1608,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         list(compilation_cases),
                         desc="Capturing CUDA graph shapes")
                 for batch_size, use_inputs_embeds in compilation_cases:
+                    print(f"[DEBUG _CAPTURE_CUDA_GRAPH] Worker rank {get_tensor_model_parallel_rank()}, Iterating compilation_case: batch_size={batch_size}, use_inputs_embeds={use_inputs_embeds}")
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
