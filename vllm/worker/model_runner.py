@@ -1609,7 +1609,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                         list(compilation_cases),
                         desc="Capturing CUDA graph shapes")
                 for batch_size, use_inputs_embeds in compilation_cases:
-                    print(f"[DEBUG _CAPTURE_CUDA_GRAPH] Worker rank {get_tensor_model_parallel_rank()}, Iterating compilation_case: batch_size={batch_size}, use_inputs_embeds={use_inputs_embeds}")
+                    print(f"[DEBUG _CAPTURE_CUDA_GRAPH] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}, VE {virtual_engine}: Iterating compilation_case: batch_size={batch_size}, use_inputs_embeds={use_inputs_embeds}")
                     attn_metadata = (
                         self.attn_state.graph_capture_get_metadata_for_batch(
                             batch_size,
@@ -1699,6 +1699,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
 
                     with set_forward_context(attn_metadata, self.vllm_config,
                                              virtual_engine):
+                        print(f"[DEBUG CAPTURE] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}, VE {virtual_engine}: About to call graph_runner.capture for key ({batch_size}, {use_inputs_embeds})")
                         graph_runner.capture(**capture_inputs)
                     self.graph_memory_pool = graph_runner.graph.pool()
                     self.graph_runners[virtual_engine][(
@@ -1839,7 +1840,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             use_inputs_embeds = model_input.inputs_embeds is not None
             # ---- START DEBUG PRINTS for execute_model ----
             # This print was already added in a previous step, ensuring it's correctly placed / not duplicated.
-            # print(f"[DEBUG LIFECYCLE] In execute_model, Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group() if self.parallel_config.pipeline_parallel_size > 1 else 0}. ID of self.graph_runners: {id(self.graph_runners)}")
+            print(f"[DEBUG LIFECYCLE] In execute_model, Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}. ID of self: {id(self)}, ID of self.graph_runners: {id(self.graph_runners)}")
             graph_lookup_key = (graph_batch_size, use_inputs_embeds)
             print(f"[DEBUG EXECUTE] In execute_model, virtual_engine: {virtual_engine}") # This was already present
             print(f"[DEBUG EXECUTE] Looking up graph with key: {graph_lookup_key}") # This was already present
