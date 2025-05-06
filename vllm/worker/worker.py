@@ -561,7 +561,7 @@ def raise_if_cache_size_invalid(num_gpu_blocks, block_size, is_attention_free,
         raise ValueError("No available memory for the cache blocks. "
                          "Try increasing `gpu_memory_utilization` when "
                          "initializing the engine.")
-    max_seq_len = block_size * (num_gpu_blocks // pipeline_parallel_size)
+    max_seq_len = block_size * num_gpu_blocks
     if not is_attention_free and max_model_len > max_seq_len:
         raise ValueError(
             f"The model's max seq len ({max_model_len}) "

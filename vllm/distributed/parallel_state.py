@@ -951,6 +951,106 @@ def initialize_model_parallel(
     config = get_current_vllm_config()
     if config is not None:
         data_parallel_size = config.parallel_config.data_parallel_size
+        parallel_config = config.parallel_config
+        model_hf_config = config.model_config.hf_config
+    else:
+        # Should not happen in normal vLLM execution flow where config is always set
+        parallel_config = None
+        model_hf_config = None
+
+    if (parallel_config and parallel_config.balance_pp_stages_by_vram
+            and pipeline_model_parallel_size > 1 and model_hf_config):
+        # VRAM-aware layer distribution for pipeline parallelism
+        local_rank_for_vram = get_world_group().local_rank
+        # Assuming CUDA platform for get_device_properties as per user context
+        # TODO: Generalize for other platforms if needed
+        try:
+            current_gpu_vram = torch.cuda.get_device_properties(
+                local_rank_for_vram).total_memory
+        except Exception as e:
+            logger.error(
+                "Failed to get GPU VRAM. Falling back to default layer distribution. Error: %s", # noqa: E501
+                e)
+            current_gpu_vram = 1  # Fallback to avoid division by zero, equal distribution
+            # Force fallback to default distribution
+            parallel_config.balance_pp_stages_by_vram = False
+
+
+        if parallel_config.balance_pp_stages_by_vram: # Check again in case it was disabled due to error
+            world_group_for_vram = get_world_group()
+            # Gather (global_rank, vram) from all ranks in the world
+            all_vrams_data = world_group_for_vram.all_gather_object(
+                [rank, current_gpu_vram])
+            all_vrams_map = {r: v for r, v in all_vrams_data}
+
+            # Temporarily reshape all_ranks to find pipeline peers easily
+            # This tensor helps map a global rank to its position in the DP/PP/TP grid
+            temp_all_ranks_for_pp_calc = torch.arange(world_size).reshape(
+                -1, data_parallel_size, pipeline_model_parallel_size,
+                tensor_model_parallel_size)
+
+            current_rank_indices_flat = (temp_all_ranks_for_pp_calc == rank).nonzero(as_tuple=False)
+            if current_rank_indices_flat.shape[0] == 0:
+                # This should not happen if rank is valid
+                raise RuntimeError(f"Rank {rank} not found in all_ranks tensor during VRAM balancing.") # noqa: E501
+            
+            current_rank_indices = current_rank_indices_flat[0]
+
+            ext_dp_idx = current_rank_indices[0].item()
+            dp_idx = current_rank_indices[1].item()
+            # pp_idx_current = current_rank_indices[2].item() # Current rank's pp stage
+            tp_idx = current_rank_indices[3].item()
+
+            # Get global ranks of all GPUs in the same pipeline as the current rank
+            pipeline_peer_global_ranks = temp_all_ranks_for_pp_calc[
+                ext_dp_idx, dp_idx, :, tp_idx].tolist()
+
+            pipeline_vrams = []
+            for peer_rank in pipeline_peer_global_ranks:
+                peer_vram = all_vrams_map.get(peer_rank)
+                if peer_vram is None: # Should not happen if all_gather_object worked
+                    logger.warning("VRAM for rank %d not found, using 1 as fallback for balancing.", peer_rank) # noqa: E501
+                    pipeline_vrams.append(1)
+                else:
+                    pipeline_vrams.append(peer_vram)
+            
+            if not pipeline_vrams or sum(pipeline_vrams) == 0:
+                 logger.warning("Total VRAM for pipeline is 0 or empty. Falling back to default layer distribution.") # noqa: E501
+                 parallel_config.balance_pp_stages_by_vram = False # Force fallback
+            
+            if parallel_config.balance_pp_stages_by_vram: # Check again
+                num_model_layers = model_hf_config.num_hidden_layers
+                total_pipeline_vram = sum(pipeline_vrams)
+                
+                proportions = [v / total_pipeline_vram for v in pipeline_vrams]
+                ideal_stage_layers = [p * num_model_layers for p in proportions]
+                
+                calculated_stage_counts = [0] * pipeline_model_parallel_size
+                current_total_assigned_layers = 0
+                
+                # Store (fractional_part, original_pipeline_stage_index)
+                remainders_info = []
+                for i in range(pipeline_model_parallel_size):
+                    assigned = int(ideal_stage_layers[i])
+                    calculated_stage_counts[i] = assigned
+                    current_total_assigned_layers += assigned
+                    remainders_info.append( (ideal_stage_layers[i] - assigned, i) )
+                
+                remainders_info.sort(key=lambda x: x[0], reverse=True)
+                
+                layers_to_distribute_remainder = num_model_layers - current_total_assigned_layers
+                for i in range(layers_to_distribute_remainder):
+                    idx_to_increment = remainders_info[i % pipeline_model_parallel_size][1]
+                    calculated_stage_counts[idx_to_increment] += 1
+                
+                assert sum(calculated_stage_counts) == num_model_layers, \
+                    f"Layer sum mismatch after VRAM balancing: {sum(calculated_stage_counts)} vs {num_model_layers}" # noqa: E501
+                
+                parallel_config._current_pipeline_stage_counts = calculated_stage_counts
+                logger.info(
+                    "Rank %d: VRAM-balanced pipeline stage layer counts for its pipeline: %s",
+                    rank, calculated_stage_counts)
+
 
     # the layout order is: ExternalDP x DP x PP x TP
     # ExternalDP is the data parallel group that is not part of the model,

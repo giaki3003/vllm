@@ -1645,6 +1645,11 @@ class ParallelConfig:
     """Port of the data parallel master."""
     enable_expert_parallel: bool = False
     """Use expert parallelism instead of tensor parallelism for MoE layers."""
+    balance_pp_stages_by_vram: bool = False
+    """If True, and pipeline_parallel_size > 1, attempt to distribute layers
+    across pipeline stages proportionally to each GPU's VRAM. This can help
+    balance memory usage on heterogeneous GPU setups. If False, layers are
+    distributed as evenly as possible."""
 
     max_parallel_loading_workers: Optional[int] = None
     """Maximum number of parallel loading workers when loading model
@@ -1691,6 +1696,10 @@ class ParallelConfig:
     world_size_across_dp: int = field(init=False)
     """world_size_across_dp is TPxPPxDP, it is the size of the world
     including data parallelism."""
+    _current_pipeline_stage_counts: Optional[List[int]] = field(default=None, init=False)  # noqa: E501
+    """Internal: Stores the calculated number of layers for each stage in the
+    current rank's pipeline, used when balance_pp_stages_by_vram is True.
+    Populated during model parallel initialization."""
 
     rank: int = 0
     """Global rank in distributed setup."""
@@ -1748,6 +1757,7 @@ class ParallelConfig:
         factors.append(self.pipeline_parallel_size)
         factors.append(self.tensor_parallel_size)
         factors.append(self.enable_expert_parallel)
+        factors.append(self.balance_pp_stages_by_vram)
         return hashlib.sha256(str(factors).encode()).hexdigest()
 
     def __post_init__(self) -> None:

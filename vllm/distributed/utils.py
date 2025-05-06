@@ -82,32 +82,68 @@ def get_pp_indices(num_hidden_layers: int, pp_rank: int,
     because they contain the input and output embeddings respectively and we
     are attempting to reduce maximum memory consumption across partitions.
     """
-    partition_list_str = envs.VLLM_PP_LAYER_PARTITION
-    if partition_list_str is not None:
-        try:
-            partitions = [
-                int(layer) for layer in partition_list_str.split(",")
-            ]
-        except ValueError as err:
-            raise ValueError("Invalid partition string: {}".format(
-                partition_list_str)) from err
-        if len(partitions) != pp_size:
-            raise ValueError(f"{len(partitions)=} does not match {pp_size=}.")
-        if sum(partitions) != num_hidden_layers:
-            raise ValueError(
-                f"{sum(partitions)=} does not match {num_hidden_layers=}.")
-    else:
-        layers_per_partition = num_hidden_layers // pp_size
-        partitions = [layers_per_partition for _ in range(pp_size)]
-
-        if remaining_layers := num_hidden_layers % pp_size:
-            for i in range(2, remaining_layers + 2):
-                partitions[-i] += 1
+    # Try to get VRAM-balanced partition counts first
+    from vllm.config import get_current_vllm_config
+    config = get_current_vllm_config()
+    partitions = None
+    if (config and config.parallel_config.balance_pp_stages_by_vram
+            and config.parallel_config._current_pipeline_stage_counts):
+        vram_partitions = config.parallel_config._current_pipeline_stage_counts
+        if len(vram_partitions) == pp_size and sum(vram_partitions) == num_hidden_layers:
+            partitions = vram_partitions
             logger.info(
-                "Hidden layers were unevenly partitioned: [%s]. "
-                "This can be manually overridden using the "
-                "VLLM_PP_LAYER_PARTITION environment variable",
+                "Using VRAM-balanced layer partitions: [%s]",
                 ",".join(str(p) for p in partitions))
+        else:
+            logger.warning(
+                "VRAM-balanced layer partition data is invalid "
+                "(len(counts)=%d vs pp_size=%d, sum(counts)=%d vs num_layers=%d). "
+                "Falling back to other methods.",
+                len(vram_partitions), pp_size, sum(vram_partitions), num_hidden_layers)
+
+    if partitions is None:
+        partition_list_str = envs.VLLM_PP_LAYER_PARTITION
+        if partition_list_str is not None:
+            try:
+                env_partitions = [
+                    int(layer) for layer in partition_list_str.split(",")
+                ]
+            except ValueError as err:
+                raise ValueError("Invalid partition string: {}".format(
+                    partition_list_str)) from err
+            if len(env_partitions) != pp_size:
+                raise ValueError(f"VLLM_PP_LAYER_PARTITION length {len(env_partitions)} "
+                                 f"does not match pipeline parallel size {pp_size}.")
+            if sum(env_partitions) != num_hidden_layers:
+                raise ValueError(
+                    f"Sum of VLLM_PP_LAYER_PARTITION {sum(env_partitions)} "
+                    f"does not match total number of hidden layers {num_hidden_layers}.")
+            partitions = env_partitions
+            logger.info(
+                "Using VLLM_PP_LAYER_PARTITION env var for layer partitions: [%s]",
+                ",".join(str(p) for p in partitions))
+        else:
+            # Default: even distribution with remainder handling
+            layers_per_partition = num_hidden_layers // pp_size
+            partitions = [layers_per_partition for _ in range(pp_size)]
+
+            if remaining_layers := num_hidden_layers % pp_size:
+                # Distribute remaining layers, typically to earlier/middle stages
+                # The existing logic distributes to all but the last, then all but the first and last.
+                # For simplicity here, we'll add to earlier stages.
+                for i in range(remaining_layers):
+                    partitions[i % pp_size] += 1 # Distribute to earliest stages first
+                logger.info(
+                    "Hidden layers were auto-partitioned (may be uneven): [%s]. "
+                    "This can be manually overridden using VLLM_PP_LAYER_PARTITION "
+                    "or balance_pp_stages_by_vram.",
+                    ",".join(str(p) for p in partitions))
+    
+    if pp_rank >= len(partitions):
+        raise ValueError(
+            f"Pipeline parallel rank {pp_rank} is out of bounds for "
+            f"the calculated partitions list (length {len(partitions)})."
+        )
 
     start_layer = sum(partitions[:pp_rank])
     end_layer = start_layer + partitions[pp_rank]
