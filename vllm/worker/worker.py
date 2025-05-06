@@ -268,6 +268,7 @@ class Worker(LocalOrDistributedWorkerBase):
         # Calculate the number of blocks that can be allocated with the
         # profiled peak memory.
         cache_block_size = self.get_cache_block_size_bytes()
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: available_kv_cache_memory = {available_kv_cache_memory} ({available_kv_cache_memory / (1024**3):.2f} GiB), cache_block_size = {cache_block_size} ({cache_block_size / (1024**2):.2f} MiB)")
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0
