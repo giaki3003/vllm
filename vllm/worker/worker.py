@@ -229,6 +229,7 @@ class Worker(LocalOrDistributedWorkerBase):
             logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Attempting isolated profile_run.")
             try:
                 self.model_runner.profile_run()
+                print(f"[RAW_PRINT_DEBUG] Worker rank {self.rank}: Python interpreter reached here after profile_run.", flush=True)
                 logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Isolated profile_run COMPLETED.")
                 logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Attempting isolated torch.cuda.synchronize().")
                 torch.cuda.synchronize()
