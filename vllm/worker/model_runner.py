@@ -1286,7 +1286,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
     def profile_run(self) -> None:
         max_num_batched_tokens = \
             self.scheduler_config.max_num_batched_tokens
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: In profile_run, about to call _dummy_run.")
         max_num_seqs = self.scheduler_config.max_num_seqs
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: In profile_run, _dummy_run completed.")
         self._dummy_run(max_num_batched_tokens, max_num_seqs)
 
     def _add_dummy_loras(self, num_loras: int) -> list[LoRARequest]:
