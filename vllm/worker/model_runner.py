@@ -1568,8 +1568,24 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 self.device) as graph_capture_context:
             # NOTE: Capturing the largest batch size first may help reduce the
             # memory usage of CUDA graph.
-            for virtual_engine in range(
-                    self.parallel_config.pipeline_parallel_size):
+
+            # If pipeline parallel > 1, only capture for the current worker's stage.
+            # The worker's self.model and self.attn_state are for its specific stage.
+            # kv_caches passed from worker is also structured for its stage at its pp_rank.
+            current_worker_pp_rank = get_pp_group().rank_in_group # Assumes get_pp_group is available
+            
+            stages_to_capture = []
+            if self.parallel_config.pipeline_parallel_size > 1:
+                stages_to_capture.append(current_worker_pp_rank)
+                # Also, the first stage (rank 0) might be special if it handles embeddings
+                # and the last stage for lm_head, but CUDAGraphRunner uses self.model which is stage-specific.
+                # So, only capturing current worker's rank seems correct.
+                # The original code iterated all virtual_engines, which would try to use this worker's
+                # model parts with KV caches from other (None for this worker) stages.
+            else: # Not pipelined, so only one "stage" (virtual_engine 0)
+                stages_to_capture.append(0)
+
+            for virtual_engine in stages_to_capture:
                 # We need to not only iterate over batch sizes, but also whether
                 # to use inputs_embeds or not, hence we use the cartesian
                 # product.

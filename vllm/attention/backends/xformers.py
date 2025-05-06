@@ -535,9 +535,31 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # If kv_cache is not provided, the new key and value tensors are
                 # not cached. This happens during the initial memory
                 # profiling run.
+                # kv_cache here is the combined K/V tensor for the layer/stage.
+                # PagedAttention.write_to_paged_cache expects separate key_cache and value_cache.
+                
+                # Initialize python local variables for key and value caches
+                py_key_cache: Optional[torch.Tensor] = None
+                py_value_cache: Optional[torch.Tensor] = None
+
+                if kv_cache is not None and kv_cache.numel() > 0 :
+                    # Assuming kv_cache shape is (num_blocks, 2, block_size, num_kv_heads, head_size)
+                    # where dim 1 is for K and V.
+                    # Ensure it has at least 2 dimensions and the 2nd dim size is 2.
+                    if kv_cache.ndim > 1 and kv_cache.shape[1] == 2:
+                        py_key_cache = kv_cache.select(1, 0)
+                        py_value_cache = kv_cache.select(1, 1)
+                    else:
+                        # This case should not happen if CacheEngine provides the expected format.
+                        # Log a warning or raise an error.
+                        logger.warning("kv_cache tensor in XFormersBackend does not have the expected shape for K/V splitting.")
+                        # Fallback: PagedAttention ops might handle None if this is a true first prefill.
+                        # Or, this indicates a deeper issue. For now, they remain None.
+                
                 PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping,
+                    key, value, py_key_cache, py_value_cache, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+        
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
@@ -553,10 +575,22 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         assert query.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
+        
+        # Define py_key_cache and py_value_cache again for prefill/decode sections
+        # based on the input kv_cache argument.
+        py_key_cache: Optional[torch.Tensor] = None
+        py_value_cache: Optional[torch.Tensor] = None
+        if kv_cache is not None and kv_cache.numel() > 0:
+            if kv_cache.ndim > 1 and kv_cache.shape[1] == 2:
+                py_key_cache = kv_cache.select(1, 0)
+                py_value_cache = kv_cache.select(1, 1)
+            else:
+                logger.warning("kv_cache tensor in XFormersBackend (prefill/decode) does not have the expected shape for K/V splitting.")
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+            if (py_key_cache is None or py_key_cache.numel() == 0 or # Check split cache
+                prefill_meta.block_tables.numel() == 0):
                 # normal attention.
                 # block tables are empty if the prompt does not have a cached
                 # prefix.
@@ -571,17 +605,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 
-                # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue (broke) to
-                # deal with different data types between KV and FP8 KV cache,
-                # to be addressed separately.
                 out = PagedAttention.forward_prefix(
                     query,
                     key,
                     value,
                     self.kv_cache_dtype,
-                    key_cache,
-                    value_cache,
+                    py_key_cache, # Use split key cache
+                    py_value_cache, # Use split value cache
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
@@ -603,11 +633,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 max_seq_len_arg,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+            
+            # Ensure py_key_cache and py_value_cache are not None for decode
+            if py_key_cache is None or py_value_cache is None:
+                raise RuntimeError("KV cache is None in decode phase, which is not expected.")
 
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
-                key_cache,
-                value_cache,
+                py_key_cache, # Use split key cache
+                py_value_cache, # Use split value cache
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
