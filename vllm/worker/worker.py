@@ -303,20 +303,29 @@ class Worker(LocalOrDistributedWorkerBase):
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
-    def initialize_cache(self, num_gpu_blocks: int,
-                         num_cpu_blocks: int) -> None:
+    def initialize_cache(self, gpu_blocks_per_worker: List[int],
+                         cpu_blocks_per_worker: List[int]) -> None:
         """Allocate GPU and CPU KV cache with the specified number of blocks.
 
         This also warms up the model, which may record CUDA graphs.
         """
-        raise_if_cache_size_invalid(
-            num_gpu_blocks, self.cache_config.block_size,
-            self.cache_config.is_attention_free,
-            self.model_config.max_model_len,
-            self.parallel_config.pipeline_parallel_size)
+# Determine the rank of this worker to pick its specific block counts.
+        # self.rank is the global rank.
+        # If pipeline parallelism is used, workers are typically indexed 0 to PP_SIZE-1
+        # within the context of the list passed from the executor.
+        # The list gpu_blocks_per_worker should be ordered by global rank.
+        my_rank_in_world = self.rank 
+        my_gpu_blocks = gpu_blocks_per_worker[my_rank_in_world]
+        my_cpu_blocks = cpu_blocks_per_worker[my_rank_in_world]
 
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        logger.info(f"Worker rank {my_rank_in_world}: Using GPU blocks: {my_gpu_blocks}, CPU blocks: {my_cpu_blocks}")
+        raise_if_cache_size_invalid(
+            my_gpu_blocks, self.cache_config.block_size,
+            self.cache_config.is_attention_free,
+            self.model_config.max_model_len)
+
+        self.cache_config.num_gpu_blocks = my_gpu_blocks
+        self.cache_config.num_cpu_blocks = my_cpu_blocks
 
         if self.vllm_config.model_config.enable_sleep_mode:
             allocator = CuMemAllocator.get_instance()

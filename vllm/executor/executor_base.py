@@ -87,7 +87,7 @@ class ExecutorBase(ABC):
         """
         raise NotImplementedError
 
-    def determine_num_available_blocks(self) -> Tuple[int, int]:
+    def determine_num_available_blocks(self) -> List[Tuple[int, int]]:
         """Determine the number of available blocks for the GPU KV cache and
         swappable CPU KV cache.
 
@@ -95,35 +95,36 @@ class ExecutorBase(ABC):
         ExecutorBase may require modification of the result, e.g. to ensure the
         selected cache sizes are compatible with all workers.
 
-        Returns a Tuple[num_gpu_blocks, num_cpu_blocks], where num_gpu_blocks
+        Returns a List of Tuples [(num_gpu_blocks_worker0, num_cpu_blocks_worker0), ...], where num_gpu_blocks
         are blocks that are "active" on the device and can be appended to.
         num_cpu_blocks refers to "swapped" blocks in CPU memory and cannot be
         appended to.
         """
         results = self.collective_rpc("determine_num_available_blocks")
         logger.warning(f"[VRAM_DEBUG] Individual worker results for determine_num_available_blocks: {results}")
-        a = min([r[0] for r in results])
-        b = min([r[1] for r in results])
-        logger.warning(f"[VRAM_DEBUG] Min num_gpu_blocks (a): {a}, Min num_cpu_blocks (b): {b}")
-        return a, b
+        
+        return results
 
-    def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:
+    def initialize_cache(self, gpu_blocks_per_worker: List[int], cpu_blocks_per_worker: List[int]) -> None:
         """Initialize the KV cache by invoking the underlying worker.
         """
+        total_gpu_blocks = sum(gpu_blocks_per_worker)
+        total_cpu_blocks = sum(cpu_blocks_per_worker)
         # NOTE: This is logged in the executor because there can be >1 workers.
-        logger.info("# %s blocks: %d, # CPU blocks: %d",
+        logger.info("# %s total blocks: %d, # CPU total blocks: %d",
                     vllm.platforms.current_platform.device_name,
-                    num_gpu_blocks, num_cpu_blocks)
-        max_concurrency = (num_gpu_blocks * self.cache_config.block_size /
-                           self.model_config.max_model_len)
-        logger.info("Maximum concurrency for %s tokens per request: %.2fx",
-                    self.model_config.max_model_len, max_concurrency)
+                    total_gpu_blocks, total_cpu_blocks)
+        if self.cache_config.block_size > 0 and total_gpu_blocks > 0 : # Avoid division by zero
+             max_concurrency = (total_gpu_blocks * self.cache_config.block_size /
+                                self.model_config.max_model_len)
+             logger.info("Approximate maximum concurrency for %s tokens per request: %.2fx (based on total blocks)",
+                         self.model_config.max_model_len, max_concurrency)
 
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.cache_config.num_gpu_blocks = total_gpu_blocks
+        self.cache_config.num_cpu_blocks = total_cpu_blocks
 
         self.collective_rpc("initialize_cache",
-                            args=(num_gpu_blocks, num_cpu_blocks))
+                            args=(gpu_blocks_per_worker, cpu_blocks_per_worker))
 
     def apply_model(self, func: Callable[[nn.Module], _R]) -> list[_R]:
         """

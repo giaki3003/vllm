@@ -418,21 +418,53 @@ class LLMEngine:
         and the swap CPU cache.
         """
         start = time.time()
-        num_gpu_blocks, num_cpu_blocks = (
+        per_worker_blocks_list = (
             self.model_executor.determine_num_available_blocks())
 
+        # per_worker_blocks_list is List[Tuple[int, int]]
+        # Each tuple is (num_gpu_blocks, num_cpu_blocks) for a worker
+        
+        num_gpu_blocks_final_for_config: int
+        num_cpu_blocks_final_for_config: int
+        
+        # These will be List[int] for GPU blocks and List[int] for CPU blocks passed to workers
+        gpu_blocks_for_workers: List[int] = [entry[0] for entry in per_worker_blocks_list]
+        cpu_blocks_for_workers: List[int] = [entry[1] for entry in per_worker_blocks_list]
         if self.cache_config.num_gpu_blocks_override is not None:
-            num_gpu_blocks_override = self.cache_config.num_gpu_blocks_override
-            logger.info(
-                "Overriding num_gpu_blocks=%d with "
-                "num_gpu_blocks_override=%d", num_gpu_blocks,
-                num_gpu_blocks_override)
-            num_gpu_blocks = num_gpu_blocks_override
+            override_val = self.cache_config.num_gpu_blocks_override
+            if self.parallel_config.balance_pp_stages_by_vram:
+                logger.warning(
+                    "Both --balance-pp-stages-by-vram is True and "
+                    "--num-gpu-blocks-override is set. "
+                    "Ignoring --num-gpu-blocks-override and using profiled VRAM-aware values."
+                )
+                # gpu_blocks_for_workers already set from profiling
+                num_gpu_blocks_final_for_config = sum(gpu_blocks_for_workers)
+                num_cpu_blocks_final_for_config = sum(cpu_blocks_for_workers)
+            else:
+                # Not VRAM balancing, so override applies. Distribute it.
+                logger.info(
+                    "Overriding profiled GPU blocks with "
+                    "num_gpu_blocks_override=%d. This will be distributed "
+                    "evenly among pipeline stages.", override_val)
+                pp_size = self.parallel_config.pipeline_parallel_size
+                if pp_size == 0: pp_size = 1 # Avoid division by zero for safety
+                
+                # Evenly distribute override if not VRAM balancing
+                gpu_blocks_for_workers = [override_val // pp_size] * len(per_worker_blocks_list)
+                # For CPU blocks, use profiled unless a specific CPU override logic is added
+                num_gpu_blocks_final_for_config = sum(gpu_blocks_for_workers) 
+                num_cpu_blocks_final_for_config = sum(cpu_blocks_for_workers)
+        else:
+            # No override, use profiled values
+            num_gpu_blocks_final_for_config = sum(gpu_blocks_for_workers)
+            num_cpu_blocks_final_for_config = sum(cpu_blocks_for_workers)
+        
 
-        self.cache_config.num_gpu_blocks = num_gpu_blocks
-        self.cache_config.num_cpu_blocks = num_cpu_blocks
+        self.cache_config.num_gpu_blocks = num_gpu_blocks_final_for_config
+        self.cache_config.num_cpu_blocks = num_cpu_blocks_final_for_config
 
-        self.model_executor.initialize_cache(num_gpu_blocks, num_cpu_blocks)
+        self.model_executor.initialize_cache(gpu_blocks_for_workers, cpu_blocks_for_workers)
         elapsed = time.time() - start
         logger.info(("init engine (profile, create kv cache, "
                      "warmup model) took %.2f seconds"), elapsed)
