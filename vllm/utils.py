@@ -2124,15 +2124,18 @@ class MemorySnapshot:
         # After `torch.cuda.reset_peak_memory_stats()`,
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
+        logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.memory_stats().get()")
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
+        logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.mem_get_info()")
         self.cuda_memory = torch.cuda.mem_get_info(
         )[1] - torch.cuda.mem_get_info()[0]
 
         # torch.cuda.memory_reserved() is how many bytes
         # PyTorch gets from cuda (by calling cudaMalloc, etc.)
         # this is used to measure the non-torch memory usage
+        logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.memory_reserved()")
         self.torch_memory = torch.cuda.memory_reserved()
 
         self.non_torch_memory = self.cuda_memory - self.torch_memory
