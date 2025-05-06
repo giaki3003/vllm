@@ -1363,7 +1363,6 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     max_num_seqs = 1
 
             batch_size = 0
-            dummy_data = None
             for group_id in range(max_num_seqs):
                 seq_len = (max_num_batched_tokens // max_num_seqs +
                            (group_id < max_num_batched_tokens % max_num_seqs))
@@ -1371,12 +1370,11 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                 if self.vllm_config and self.vllm_config.parallel_config.rank == 1: # Assuming worker 1 is the problematic one
                     seq_len = 2 # Use a very small, fixed seq_len for worker 1
                     logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank 1: Forcing dummy_run seq_len to {seq_len} for profiling.")
-                else:
 
-                    dummy_data = self.input_registry \
-                        .dummy_data_for_profiling(self.model_config,
-                                                  seq_len,
-                                                  self.mm_registry)
+                dummy_data = self.input_registry \
+                    .dummy_data_for_profiling(self.model_config,
+                                              seq_len,
+                                              self.mm_registry)
                 #logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: _dummy_run using seq_len={seq_len}, max_batched_tokens={max_num_batched_tokens}, max_seqs={max_num_seqs})")
 
                 seq = SequenceGroupMetadata(
