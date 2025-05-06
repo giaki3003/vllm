@@ -1158,6 +1158,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             self.builder = self._builder_cls(weakref.proxy(self))
 
     def load_model(self) -> None:
+        print(f"[DEBUG LIFECYCLE] ENTERING load_model for self ID {id(self)}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}. ID of self.graph_runners: {id(self.graph_runners) if hasattr(self, 'graph_runners') else 'N/A'}")
         logger.info("Starting to load model %s...", self.model_config.model)
         with DeviceMemoryProfiler(self.device) as m:
             time_before_load = time.perf_counter()
@@ -1713,6 +1714,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / GiB_bytes)
+        print(f"[DEBUG LIFECYCLE] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}: EXITING capture_model. ID of self.graph_runners: {id(self.graph_runners)}, Keys for VE 0: {list(self.graph_runners[0].keys()) if 0 < len(self.graph_runners) and self.graph_runners[0] is not None else 'VE 0 empty/None/N/A'}, Keys for VE 1: {list(self.graph_runners[1].keys()) if 1 < len(self.graph_runners) and self.graph_runners[1] is not None else 'VE 1 empty/None/N/A'}")
         print(f"[DEBUG LIFECYCLE] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}: EXITING capture_model. ID of self.graph_runners: {id(self.graph_runners)}, Keys for VE 0: {list(self.graph_runners[0].keys()) if 0 < len(self.graph_runners) and self.graph_runners[0] is not None else 'VE 0 empty/None/N/A'}, Keys for VE 1: {list(self.graph_runners[1].keys()) if 1 < len(self.graph_runners) and self.graph_runners[1] is not None else 'VE 1 empty/None/N/A'}")
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
