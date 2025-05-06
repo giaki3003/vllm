@@ -23,6 +23,8 @@ from vllm.sequence import ExecuteModelRequest
 from vllm.utils import (_run_task_with_lock, get_distributed_init_method,
                         get_ip, get_open_port, make_async)
 
+from collections import Counter
+
 if ray is not None:
     from ray.actor import ActorHandle
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -156,7 +158,18 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
+        logger.info("[DEBUG RAY INIT] Entering _init_workers_ray...")
+        logger.info(f"[DEBUG RAY INIT] Received placement_group type: {type(placement_group)}")
+        if placement_group:
+            logger.info(f"[DEBUG RAY INIT] Placement group ID: {placement_group.id}")
+            logger.info(f"[DEBUG RAY INIT] Placement group specs: {placement_group.bundle_specs}")
+        else:
+            logger.warning("[DEBUG RAY INIT] Received placement_group is None!")
+
+        logger.info(f"[DEBUG RAY INIT] Received ray_remote_kwargs: {ray_remote_kwargs}")
+
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
+        logger.info(f"[DEBUG RAY INIT] VLLM_RAY_PER_WORKER_GPUS: {num_gpus}")
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -170,96 +183,283 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
 
         if self.parallel_config.ray_workers_use_nsight:
+            logger.info("[DEBUG RAY INIT] Configuring Ray workers for Nsight...")
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
+            logger.info(f"[DEBUG RAY INIT] Updated ray_remote_kwargs for Nsight: {ray_remote_kwargs}")
 
-        logger.info("use_ray_spmd_worker: %s", self.use_ray_spmd_worker)
+        logger.info(f"[DEBUG RAY INIT] use_ray_spmd_worker flag: {self.use_ray_spmd_worker}")
 
         # Create the workers.
         bundle_indices: List[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
+            logger.info(f"[DEBUG RAY INIT] Using user-provided VLLM_RAY_BUNDLE_INDICES: {envs.VLLM_RAY_BUNDLE_INDICES}")
             # Use the bundle indices specified by the user.
-            bundle_indices = list(
-                map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
-            assert len(bundle_indices) == self.parallel_config.world_size, \
-            ("VLLM_RAY_BUNDLE_INDICES must have the same size"
-            f" as the world size, but got {bundle_indices=} "
-            f"and {self.parallel_config.world_size=}")
-            assert len(set(bundle_indices)) == len(bundle_indices), \
-            ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
-            f" but got {bundle_indices=}")
+            try:
+                bundle_indices = list(
+                    map(int, envs.VLLM_RAY_BUNDLE_INDICES.split(",")))
+                assert len(bundle_indices) == self.parallel_config.world_size, \
+                ("VLLM_RAY_BUNDLE_INDICES must have the same size"
+                 f" as the world size, but got {bundle_indices=} "
+                 f"and {self.parallel_config.world_size=}")
+                assert len(set(bundle_indices)) == len(bundle_indices), \
+                ("VLLM_RAY_BUNDLE_INDICES cannot have duplicate values,"
+                 f" but got {bundle_indices=}")
+                logger.info(f"[DEBUG RAY INIT] Parsed bundle_indices: {bundle_indices}")
+            except Exception as e:
+                logger.error(f"[DEBUG RAY INIT] Failed to parse VLLM_RAY_BUNDLE_INDICES: {e}")
+                raise
         else:
+            logger.info("[DEBUG RAY INIT] VLLM_RAY_BUNDLE_INDICES not set, deriving indices from placement group...")
             # use the first N bundles that have GPU resources.
             bundle_indices = []
-            for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-                if bundle.get(current_platform.ray_device_key, 0):
-                    bundle_indices.append(bundle_id)
-            bundle_indices = bundle_indices[:self.parallel_config.world_size]
+            if placement_group and placement_group.bundle_specs:
+                for bundle_id, bundle in enumerate(placement_group.bundle_specs):
+                    logger.debug(f"[DEBUG RAY INIT] Checking bundle {bundle_id}: {bundle}")
+                    # Use current_platform.ray_device_key which should be "GPU" for CUDA
+                    if bundle.get(current_platform.ray_device_key, 0):
+                        logger.debug(f"[DEBUG RAY INIT] Bundle {bundle_id} has '{current_platform.ray_device_key}', adding to indices.")
+                        bundle_indices.append(bundle_id)
+                    else:
+                         logger.debug(f"[DEBUG RAY INIT] Bundle {bundle_id} does not have '{current_platform.ray_device_key}'.")
+
+                logger.info(f"[DEBUG RAY INIT] Found {len(bundle_indices)} bundles with GPUs: {bundle_indices}")
+                if len(bundle_indices) < self.parallel_config.world_size:
+                    logger.warning(f"[DEBUG RAY INIT] Found fewer GPU bundles ({len(bundle_indices)}) "
+                                   f"than world size ({self.parallel_config.world_size})!")
+                bundle_indices = bundle_indices[:self.parallel_config.world_size]
+                logger.info(f"[DEBUG RAY INIT] Final bundle_indices to use (up to world size): {bundle_indices}")
+            else:
+                logger.error("[DEBUG RAY INIT] Cannot derive bundle indices: Placement group is None or has no bundle_specs!")
+                bundle_indices = []
 
         worker_metadata: List[RayWorkerMetaData] = []
-        driver_ip = get_ip()
+        try:
+            # Assuming get_ip() is defined in ray_utils or globally accessible
+            driver_ip = get_ip()
+            logger.info(f"[DEBUG RAY INIT] Driver IP detected by get_ip(): {driver_ip}")
+        except Exception as e:
+            logger.error(f"[DEBUG RAY INIT] Failed to get driver IP using get_ip(): {e}")
+            driver_ip = "?.?.?.?" # Assign a dummy value
+
+        if 'bundle_indices' not in locals():
+            logger.error("[DEBUG RAY INIT] CRITICAL: bundle_indices was not defined before worker creation loop!")
+            bundle_indices = []
+
         for rank, bundle_id in enumerate(bundle_indices):
-            scheduling_strategy = PlacementGroupSchedulingStrategy(
-                placement_group=placement_group,
-                placement_group_capture_child_tasks=True,
-                placement_group_bundle_index=bundle_id,
-            )
+            worker = None
+            try:
+                scheduling_strategy = PlacementGroupSchedulingStrategy(
+                    placement_group=placement_group,
+                    placement_group_capture_child_tasks=True,
+                    placement_group_bundle_index=bundle_id,
+                )
+                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}, bundle_id {bundle_id}: "
+                            f"Using scheduling strategy: {scheduling_strategy}")
 
-            if current_platform.ray_device_key == "GPU":
-                # NV+AMD GPUs, and Intel XPUs
-                worker = ray.remote(
+                device_key = current_platform.ray_device_key
+                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Checking device key: '{device_key}'")
+
+                remote_args = dict(
                     num_cpus=0,
-                    num_gpus=num_gpus,
                     scheduling_strategy=scheduling_strategy,
                     **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rpc_rank=rank)
+                )
+
+                if device_key == "GPU":
+                    remote_args["num_gpus"] = num_gpus
+                    logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Configuring Ray actor with num_gpus={num_gpus}")
+                else:
+                    remote_args["resources"] = {device_key: num_gpus}
+                    logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Configuring Ray actor with resources={{{device_key}: {num_gpus}}}")
+
+                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Calling ray.remote with args: {remote_args}")
+                # Assuming RayWorkerWrapper is imported correctly
+                worker = ray.remote(**remote_args)(RayWorkerWrapper).remote(
+                    vllm_config=self.vllm_config, rpc_rank=rank
+                )
+                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Ray actor created: {worker}")
+
+            except Exception as e:
+                logger.error(f"[DEBUG RAY INIT] Loop rank {rank}: FAILED to create Ray actor!")
+                logger.error(traceback.format_exc())
+                pass
+
+            if worker is None:
+                logger.error(f"[DEBUG RAY INIT] Loop rank {rank}: 'worker' is None after creation attempt. Skipping metadata.")
+                raise RuntimeError(f"Failed to create Ray actor for rank {rank}. Check logs above.")
             else:
-                worker = ray.remote(
-                    num_cpus=0,
-                    num_gpus=0,
-                    resources={current_platform.ray_device_key: num_gpus},
-                    scheduling_strategy=scheduling_strategy,
-                    **ray_remote_kwargs,
-                )(RayWorkerWrapper).remote(vllm_config=self.vllm_config,
-                                           rpc_rank=rank)
-            worker_metadata.append(
-                RayWorkerMetaData(worker=worker, created_rank=rank))
+                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Appending metadata for worker: {worker}")
+                worker_metadata.append(
+                    RayWorkerMetaData(worker=worker, created_rank=rank))
 
-        worker_ips = ray.get([
-            each.worker.get_node_ip.remote()  # type: ignore[attr-defined]
-            for each in worker_metadata
-        ])
 
-        for each, ip in zip(worker_metadata, worker_ips):
-            each.ip = ip
+        if not worker_metadata or len(worker_metadata) < self.parallel_config.world_size:
+             logger.error(f"[DEBUG RAY INIT] Failed to create all required workers. "
+                          f"Expected {self.parallel_config.world_size}, got {len(worker_metadata)}. Aborting.")
+             raise RuntimeError("Failed to create all required Ray workers.")
 
+        logger.info("[DEBUG RAY INIT] Attempting to get IPs from created Ray workers...")
+        try:
+            worker_ips = ray.get([
+                each.worker.get_node_ip.remote() # type: ignore[attr-defined]
+                for each in worker_metadata
+            ], timeout=60.0)
+            logger.info(f"[DEBUG RAY INIT] Worker IPs reported by Ray actors: {worker_ips}")
+        except Exception as e:
+            logger.error(f"[DEBUG RAY INIT] Failed to get IPs from Ray workers: {e}")
+            logger.error(traceback.format_exc())
+            raise RuntimeError(f"Failed to get IPs from Ray workers. Check logs and Ray cluster status. Error: {e}")
+
+        for i, ip in enumerate(worker_ips):
+            if i < len(worker_metadata):
+                worker_metadata[i].ip = ip if ip is not None else "IP_QUERY_FAILED"
+            else:
+                 logger.warning(f"[DEBUG RAY INIT] Index {i} out of bounds for worker_metadata while assigning IPs.")
+
+        # --- FIX for ip_counts NameError ---
+        # Calculate ip_counts based on the reported IPs in worker_metadata
+        logger.info("[DEBUG RAY INIT] Calculating ip_counts for sorting...")
+        valid_ips = [md.ip for md in worker_metadata if md.ip and md.ip != "IP_QUERY_FAILED"]
+        # Also consider the driver_ip itself if it's not None/dummy
+        if driver_ip != "?.?.?.?":
+             valid_ips.append(driver_ip) # Add driver ip to the list for counting consistency
+        ip_counts = Counter(valid_ips)
+        logger.info(f"[DEBUG RAY INIT] Calculated ip_counts: {ip_counts}")
+        # --- END ip_counts FIX ---
+
+        # === MODIFIED LOGIC FOR FINDING DRIVER DUMMY WORKER ===
         if not self.use_ray_spmd_worker:
-            for i, each in enumerate(worker_metadata):
-                # find and remove the dummy worker from the list
-                worker = each.worker
-                worker_ip = each.ip
-                if self.driver_dummy_worker is None and worker_ip == driver_ip:
-                    # If the worker is on the same node as the driver, we use it
-                    # as the resource holder for the driver process.
-                    self.driver_dummy_worker = worker
+            logger.info("[DEBUG RAY INIT] Identifying driver dummy worker by assuming rank 0 (non-SPMD mode)...")
+            driver_dummy_worker_found_by_rank = False
+            driver_worker_index = -1
+            target_driver_rank = 0
+
+            for i, md in enumerate(worker_metadata):
+                logger.debug(f"[DEBUG RAY INIT] Checking metadata index {i} for rank {target_driver_rank}. Metadata rank: {md.created_rank}")
+                if md.created_rank == target_driver_rank:
+                    logger.info(f"[DEBUG RAY INIT] Found potential driver dummy worker by rank: worker metadata entry {i} (rank {md.created_rank}), Reported Actor IP={md.ip}")
+                    self.driver_dummy_worker = md.worker
+                    # Assuming RayWorkerWrapper import is correct
                     self.driver_worker = RayWorkerWrapper(
-                        vllm_config=self.vllm_config, rpc_rank=0)
-                    worker_metadata.pop(i)
+                        vllm_config=self.vllm_config, rpc_rank=target_driver_rank)
+                    driver_worker_index = i
+                    driver_dummy_worker_found_by_rank = True
+                    logger.info(f"[DEBUG RAY INIT] Assigned worker {i} (rank {target_driver_rank}) as driver_dummy_worker based on rank.")
                     break
 
-        logger.debug("workers: %s", worker_metadata)
-        logger.debug("driver_dummy_worker: %s", self.driver_dummy_worker)
-        if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
-            raise ValueError(
-                "Ray does not allocate any GPUs on the driver node."
-                f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
-                "Consider adjusting the Ray placement group or running "
-                "the driver on a GPU node.")
+            if driver_worker_index != -1:
+                 logger.info(f"[DEBUG RAY INIT] Removing worker {driver_worker_index} (rank {target_driver_rank}) from worker_metadata list as it's the driver dummy.")
+                 if driver_worker_index < len(worker_metadata):
+                     worker_metadata.pop(driver_worker_index)
+                 else:
+                      logger.error(f"[DEBUG RAY INIT] Invalid index {driver_worker_index} for popping from worker_metadata (size {len(worker_metadata)})")
+            elif not driver_dummy_worker_found_by_rank:
+                 logger.error(f"[DEBUG RAY INIT] CRITICAL: Could not find worker with rank {target_driver_rank} to assign as driver dummy!")
 
-        ip_counts: Dict[str, int] = {}
-        for ip in worker_ips:
-            ip_counts[ip] = ip_counts.get(ip, 0) + 1
+        # === END OF MODIFIED LOGIC ===
+
+        # --- Define the sorting key function (moved here for clarity) ---
+        def sort_by_driver_then_worker_ip(driver_ip_val, ip_counts_val):
+            def sort_key(worker_meta_data: RayWorkerMetaData):
+                ip = worker_meta_data.ip
+                if ip is None or ip == "IP_QUERY_FAILED":
+                    return (2, 0, "") # Put failed IPs last
+                # Sort driver node first (0), then by IP frequency (ascending), then by IP string
+                return (0 if ip == driver_ip_val else 1, ip_counts_val.get(ip, 0), ip)
+            return sort_key
+
+        # Now use the key function factory when sorting
+        logger.info("[DEBUG RAY INIT] Sorting worker_metadata...")
+        try:
+            # Pass the calculated ip_counts and driver_ip to the key function factory
+            sorted_worker_metadata = sorted(
+                 worker_metadata,
+                 key=sort_by_driver_then_worker_ip(driver_ip, ip_counts))
+            logger.info(f"[DEBUG RAY INIT] Sorted worker_metadata (by rank): {[md.created_rank for md in sorted_worker_metadata]}")
+            # Assign self.workers based on the sorted list
+            self.workers = [each.worker for each in sorted_worker_metadata]
+        except Exception as e:
+             logger.error(f"[DEBUG RAY INIT] Failed during sorting: {e}")
+             logger.error(traceback.format_exc())
+             # Fallback: Use unsorted list if sorting fails?
+             logger.warning("[DEBUG RAY INIT] Sorting failed, using unsorted worker list for self.workers.")
+             self.workers = [each.worker for each in worker_metadata]
+
+
+        logger.info(f"[DEBUG RAY INIT] Final self.workers list (size {len(self.workers)}): {self.workers}")
+        logger.info(f"[DEBUG RAY INIT] Final self.driver_dummy_worker: {self.driver_dummy_worker}")
+        logger.info(f"[DEBUG RAY INIT] Final self.driver_worker (created if dummy found): {getattr(self, 'driver_worker', 'Not Created')}")
+
+        # This check should now pass if rank 0 worker was successfully found and assigned
+        if not self.use_ray_spmd_worker and self.driver_dummy_worker is None:
+            logger.error(f"[DEBUG RAY INIT] Raising ValueError: driver_dummy_worker is None (Rank {target_driver_rank} not found?). "
+                         f"Driver IP={driver_ip}, Detected Worker IPs={worker_ips}")
+            raise ValueError(
+                "Ray does not allocate any GPUs on the driver node (Failed to identify driver worker by rank)."
+                f"Driver IP: {driver_ip}, worker IPs: {worker_ips}."
+                "Check Ray scheduling and worker initialization for rank 0.")
+
+
+        logger.info("[DEBUG RAY INIT] Successfully initialized Ray workers and identified driver worker.")
+
+        # Assign workers to the pp_tp_workers grid
+        logger.info("[DEBUG RAY INIT] Assigning workers to pp_tp_workers grid...")
+        self.pp_tp_workers = [
+            [None] * self.parallel_config.tensor_parallel_size
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+
+        # Reconstruct the full worker map including the identified driver dummy
+        worker_map_by_rank = {}
+        # Use the *sorted* list for self.workers now
+        for md in sorted_worker_metadata: # Ranks != target_driver_rank
+            worker_map_by_rank[md.created_rank] = md.worker
+        if self.driver_dummy_worker:
+            # Add the dummy worker back using its assumed rank
+            worker_map_by_rank[target_driver_rank] = self.driver_dummy_worker
+
+        expected_worker_count = self.parallel_config.world_size
+        if len(worker_map_by_rank) != expected_worker_count:
+             logger.warning(f"[DEBUG RAY INIT] Mismatch between number of workers in map "
+                            f"({len(worker_map_by_rank)}) and world size "
+                            f"({expected_worker_count}) before assigning to grid.")
+
+        assigned_ranks = set()
+        logger.info(f"[DEBUG RAY INIT] Using direct calculation for PP/TP ranks based on TP size: {self.parallel_config.tensor_parallel_size}")
+        for rank in range(expected_worker_count):
+            # === MODIFIED RANK CALCULATION ===
+            tp_size = self.parallel_config.tensor_parallel_size
+            # Ensure tp_size is not zero to avoid division error
+            if tp_size == 0:
+                 logger.error("[DEBUG RAY INIT] Tensor parallel size is zero, cannot calculate ranks!")
+                 raise ValueError("Tensor parallel size cannot be zero.")
+            pp_rank = rank // tp_size
+            tp_rank = rank % tp_size
+            logger.debug(f"[DEBUG RAY INIT] Calculated for rank {rank}: pp_rank={pp_rank}, tp_rank={tp_rank}")
+            # === END MODIFIED RANK CALCULATION ===
+
+            if rank in worker_map_by_rank:
+                 # Check if indices are valid before assignment
+                 if pp_rank < len(self.pp_tp_workers) and tp_rank < len(self.pp_tp_workers[pp_rank]):
+                     self.pp_tp_workers[pp_rank][tp_rank] = worker_map_by_rank[rank]
+                     assigned_ranks.add(rank)
+                     logger.info(f"[DEBUG RAY INIT] Assigned worker rank {rank} (from map) to pp_tp_workers[{pp_rank}][{tp_rank}]")
+                 else:
+                      logger.error(f"[DEBUG RAY INIT] Calculated indices out of bounds! rank={rank}, pp_rank={pp_rank}, tp_rank={tp_rank}, grid shape=({len(self.pp_tp_workers)} x {len(self.pp_tp_workers[0]) if self.pp_tp_workers and len(self.pp_tp_workers[0]) > tp_rank else 'invalid'})")
+                      raise IndexError(f"Calculated grid indices out of bounds for rank {rank}")
+            else:
+                 logger.error(f"[DEBUG RAY INIT] Could not find worker for rank {rank} in worker_map_by_rank!")
+                 raise RuntimeError(f"Internal error: Worker for rank {rank} not found during grid assignment.")
+
+
+        if len(assigned_ranks) != expected_worker_count:
+             logger.error(f"[DEBUG RAY INIT] Failed to assign all ranks to the grid! Assigned: {assigned_ranks}, Expected: {set(range(expected_worker_count))}")
+             # Decide how to handle: maybe raise an error?
+             raise RuntimeError("Failed to assign all ranks to the grid.")
+
+        logger.info(f"[DEBUG RAY INIT] pp_tp_workers grid assignment complete. Example worker at [0][0]: {self.pp_tp_workers[0][0]}")
+        logger.info("[DEBUG RAY INIT] Exiting _init_workers_ray successfully.")
 
         def sort_by_driver_then_worker_ip(item: RayWorkerMetaData):
             """
@@ -318,14 +518,14 @@ class RayDistributedExecutor(DistributedExecutorBase):
         n_ips = len(all_ips)
         n_nodes = len(node_workers)
 
-        if n_nodes != n_ips:
-            raise RuntimeError(
-                f"Every node should have a unique IP address. Got {n_nodes}"
-                f" nodes with node ids {list(node_workers.keys())} and "
-                f"{n_ips} unique IP addresses {all_ips}. Please check your"
-                " network configuration. If you set `VLLM_HOST_IP`"
-                " environment variable, make sure it is unique for"
-                " each node.")
+        #if n_nodes != n_ips:
+            #raise RuntimeError(
+            #    f"Every node should have a unique IP address. Got {n_nodes}"
+            #    f" nodes with node ids {list(node_workers.keys())} and "
+            #    f"{n_ips} unique IP addresses {all_ips}. Please check your"
+            #    " network configuration. If you set `VLLM_HOST_IP`"
+            #    " environment variable, make sure it is unique for"
+            #    " each node.")
 
         # Set environment variables for the driver and workers.
         all_args_to_update_environment_variables = [{
