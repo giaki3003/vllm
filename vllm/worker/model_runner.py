@@ -1372,7 +1372,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     .dummy_data_for_profiling(self.model_config,
                                               seq_len,
                                               self.mm_registry)
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: _dummy_run using seq_len={seq_len}, max_batched_tokens={max_num_batched_tokens}, max_seqs={max_num_seqs})")
+                #logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: _dummy_run using seq_len={seq_len}, max_batched_tokens={max_num_batched_tokens}, max_seqs={max_num_seqs})")
 
                 seq = SequenceGroupMetadata(
                     request_id=str(group_id),
@@ -1416,7 +1416,9 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             if model_input.attn_metadata is not None:
                 model_input.attn_metadata.enable_kv_scales_calculation = False
 
+            logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: _dummy_run before synchronize() line 1419.")
             self.execute_model(model_input, kv_caches, intermediate_tensors)
+            logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: _dummy_run after synchronize() line 1419.")
             torch.cuda.synchronize()
             if self.lora_config:
                 self._remove_dummy_loras()
