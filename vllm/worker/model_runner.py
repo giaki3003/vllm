@@ -1420,6 +1420,10 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             if self.lora_config:
                 self._remove_dummy_loras()
 
+            logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: At end of _dummy_run, before final gc.collect and synchronize.")
+            gc.collect()
+            torch.cuda.synchronize()
+            logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.vllm_config.parallel_config.rank if self.vllm_config else 'N/A'}: At end of _dummy_run, after final gc.collect and synchronize.")
             return
 
     def remove_all_loras(self):
