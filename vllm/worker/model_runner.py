@@ -1363,6 +1363,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     max_num_seqs = 1
 
             batch_size = 0
+            dummy_data = None
             for group_id in range(max_num_seqs):
                 seq_len = (max_num_batched_tokens // max_num_seqs +
                            (group_id < max_num_batched_tokens % max_num_seqs))
