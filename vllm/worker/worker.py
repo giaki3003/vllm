@@ -255,7 +255,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
 
-        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: After memory_profiling context. Result active memory: {result.active_memory_increase}, peak: {result.torch_peak_increase}")
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: After memory_profiling context. Result weights memory: {result.weights_memory}, peak: {result.torch_peak_increase}")
 
         self._assert_memory_footprint_increased_during_profiling()
 
