@@ -2223,8 +2223,9 @@ def memory_profiling(
 
     The increase of `non_torch_memory` from creating the current vLLM instance until after profiling to get (c.).
     """ # noqa
-    gc.collect()
-    torch.cuda.empty_cache()
+    # gc.collect() # Temporarily commented out for debugging hang
+    # torch.cuda.empty_cache() # Temporarily commented out for debugging hang
+    logger.error(f"[MEMORY_PROFILE_ENTRY_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Initial gc.collect and empty_cache SKIPPED.")
     torch.cuda.reset_peak_memory_stats()
 
     result = MemoryProfilingResult()
