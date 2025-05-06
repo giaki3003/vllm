@@ -225,23 +225,7 @@ class Worker(LocalOrDistributedWorkerBase):
     
     def determine_num_available_blocks(self) -> Tuple[int, int]:
         logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Starting determine_num_available_blocks.")
-        if self.rank == 1: # Or whatever the rank of the hanging worker is
-            logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Attempting isolated profile_run.")
-            try:
-                self.model_runner.profile_run()
-                print(f"[RAW_PRINT_DEBUG] Worker rank {self.rank}: Python interpreter reached here after profile_run.", flush=True)
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Isolated profile_run COMPLETED.")
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Attempting isolated torch.cuda.synchronize().")
-                torch.cuda.synchronize()
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Isolated torch.cuda.synchronize() COMPLETED.")
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Returning dummy block values after isolated test.")
-            except Exception as e:
-                logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: EXCEPTION during isolated test: {e}", exc_info=True)
-            finally:
-                # Return dummy values to prevent further execution in this path for worker 1 for this test
-                return 100, 100 # Arbitrary small number of blocks
-
-        # Original code continues for other workers (rank 0)
+        
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
