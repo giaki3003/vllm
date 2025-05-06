@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
+                              get_pp_group, # Corrected import
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
@@ -91,10 +92,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
         # Uninitialized cache engine. Will be initialized by
         # initialize_cache.
-        self.cache_engine: List[CacheEngine]
+        self.cache_engine: Optional[CacheEngine] = None
         # Initialize gpu_cache as pooling models don't initialize kv_caches
-        self.gpu_cache: Optional[List[List[torch.Tensor]]] = None
+        self.gpu_cache: Optional[List[torch.Tensor]] = None
         self._seq_group_metadata_cache: Dict[str, SequenceGroupMetadata] = {}
+        self.pipeline_stage_rank: Optional[int] = None
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: Dict[str, torch.Tensor] = {}
@@ -187,6 +189,19 @@ class Worker(LocalOrDistributedWorkerBase):
         init_worker_distributed_environment(self.vllm_config, self.rank,
                                             self.distributed_init_method,
                                             self.local_rank)
+        # Set the pipeline stage rank for this worker
+        if self.parallel_config.pipeline_parallel_size > 1:
+            # Ensure PP group is initialized before trying to get rank in it
+            if get_pp_group() is not None:
+                 self.pipeline_stage_rank = get_pp_group().rank_in_group
+            else:
+                # This case should ideally not happen if ensure_model_parallel_initialized was called
+                logger.error("Pipeline parallel group not initialized when trying to get rank in init_device.")
+                # Fallback or raise error, for now, let's assume 0 if group not ready,
+                # though this might indicate a deeper issue.
+                self.pipeline_stage_rank = 0
+        else:
+            self.pipeline_stage_rank = 0
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -349,48 +364,38 @@ class Worker(LocalOrDistributedWorkerBase):
         self._warm_up_model()
 
     def _init_cache_engine(self):
-        # Calculate num_present_layers for this worker stage
-        num_present_layers = 0
-        # Ensure model and layers attribute exist and are of expected type
-        if hasattr(self.model_runner, 'model') and \
-           hasattr(self.model_runner.model, 'layers') and \
-           isinstance(self.model_runner.model.layers, torch.nn.ModuleList):
-            for layer in self.model_runner.model.layers:
-                if not isinstance(layer, PPMissingLayer):
-                    num_present_layers += 1
-            if num_present_layers == 0 and len(self.model_runner.model.layers) > 0:
-                logger.warning(f"Worker rank {self.rank}: All layers in model_runner.model.layers are PPMissingLayer. Defaulting to total model layers for CacheEngine.")
-                num_present_layers = self.model_config.get_num_layers(self.parallel_config)
+        assert self.pipeline_stage_rank is not None, "Worker's pipeline_stage_rank not initialized"
+        
+        if self.parallel_config.pipeline_parallel_size > 1 and \
+           self.parallel_config._current_pipeline_stage_counts:
+            num_layers_for_this_stage = self.parallel_config._current_pipeline_stage_counts[self.pipeline_stage_rank]
+            if num_layers_for_this_stage == 0: # Stage might have 0 layers if model is small
+                 logger.warning(
+                    f"Worker for stage {self.pipeline_stage_rank} has 0 layers assigned based on VRAM balancing. "
+                    f"CacheEngine will be initialized for 1 layer to avoid errors, but this stage might be unused.")
+                 num_layers_for_this_stage = 1 # Avoid CacheEngine error with 0 layers
         else:
-            num_present_layers = self.model_config.get_num_layers(self.parallel_config)
-            logger.warning(
-                f"Worker rank {self.rank}: Could not determine present layers from "
-                f"model_runner.model.layers. Using total model layers {num_present_layers} "
-                f"for CacheEngine. This might be incorrect for PP if this worker is a stage."
-            )
+            # Not using pipeline parallelism or VRAM balancing, so this worker has all layers.
+            num_layers_for_this_stage = self.model_config.get_num_layers(self.parallel_config)
+            if num_layers_for_this_stage == 0: # Fallback for very small models or misconfiguration
+                logger.warning(
+                    f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): num_layers_for_this_stage calculated as 0. "
+                    f"Defaulting to 1 layer for CacheEngine. Total model layers: {self.model_config.get_num_layers(self.parallel_config)}")
+                num_layers_for_this_stage = 1
 
-        if num_present_layers == 0: # Should be at least 1 if this worker has any useful part of the model
-            logger.warning(
-                f"Worker rank {self.rank}: num_present_layers is 0 after checks. "
-                f"Defaulting to total model layers {self.model_config.get_num_layers(self.parallel_config)} "
-                f"for CacheEngine initialization. This worker might not need a full KV cache."
-            )
-            num_present_layers = self.model_config.get_num_layers(self.parallel_config)
-            if num_present_layers == 0 : num_present_layers = 1 # Final fallback to avoid division by zero if total layers is also 0
 
-        logger.error(f"[CACHE_ENGINE_DEBUG] Worker rank {self.rank}: num_present_layers for this worker = {num_present_layers}")
-        assert self.cache_config.num_gpu_blocks is not None
-        logger.error(f"[WORKER_PY_CALL_DEBUG] About to call CacheEngine with num_present_layers = {num_present_layers}")
-        self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config,
-                        num_present_layers) # Pass num_present_layers
-            for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
-        self.gpu_cache = [
-            self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        logger.info(f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): Initializing CacheEngine for {num_layers_for_this_stage} layers.")
+        assert self.cache_config.num_gpu_blocks is not None, \
+            f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): num_gpu_blocks is None before CacheEngine init."
+
+        self.cache_engine = CacheEngine(
+            self.cache_config,
+            self.model_config,
+            self.parallel_config,
+            self.device_config,
+            num_layers_for_this_stage
+        )
+        self.gpu_cache = self.cache_engine.gpu_cache
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache)
 
@@ -453,19 +458,29 @@ class Worker(LocalOrDistributedWorkerBase):
 
     @torch.inference_mode()
     def execute_worker(self, worker_input: WorkerInput) -> None:
-        virtual_engine = worker_input.virtual_engine
-        # Issue cache operations.
-        if (worker_input.blocks_to_swap_in is not None
-                and worker_input.blocks_to_swap_in.numel() > 0):
-            self.cache_engine[virtual_engine].swap_in(
-                worker_input.blocks_to_swap_in)
-        if (worker_input.blocks_to_swap_out is not None
-                and worker_input.blocks_to_swap_out.numel() > 0):
-            self.cache_engine[virtual_engine].swap_out(
-                worker_input.blocks_to_swap_out)
-        if (worker_input.blocks_to_copy is not None
-                and worker_input.blocks_to_copy.numel() > 0):
-            self.cache_engine[virtual_engine].copy(worker_input.blocks_to_copy)
+        request_target_stage = worker_input.virtual_engine
+        
+        # Worker should only perform cache operations if the request is for its stage
+        if request_target_stage == self.pipeline_stage_rank:
+            assert self.cache_engine is not None, \
+                f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): cache_engine is None in execute_worker."
+            # Issue cache operations.
+            if (worker_input.blocks_to_swap_in is not None
+                    and worker_input.blocks_to_swap_in.numel() > 0):
+                self.cache_engine.swap_in(
+                    worker_input.blocks_to_swap_in)
+            if (worker_input.blocks_to_swap_out is not None
+                    and worker_input.blocks_to_swap_out.numel() > 0):
+                self.cache_engine.swap_out(
+                    worker_input.blocks_to_swap_out)
+            if (worker_input.blocks_to_copy is not None
+                    and worker_input.blocks_to_copy.numel() > 0):
+                self.cache_engine.copy(worker_input.blocks_to_copy)
+        # else:
+            # Optionally, log if a worker for one stage receives a cache op request for another.
+            # This might indicate an issue upstream or be expected if requests are broadcast.
+            # logger.debug(f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}) "
+            #              f"received cache op for stage {request_target_stage}, ignoring.")
 
     def _get_cached_seq_group_metadata(
             self,
