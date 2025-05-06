@@ -2446,26 +2446,41 @@ def bind_kv_cache(
     #    attention of the same layer (e.g., bart's decoder.layers.1.self_attn
     #    and decoder.layers.1.encoder_attn) is mapped to the same kv cache
     #    tensor
-    from vllm.attention import AttentionType
-    from vllm.model_executor.models.utils import extract_layer_index
-    layer_need_kv_cache = [
-        layer_name for layer_name in ctx
-        if (hasattr(ctx[layer_name], 'attn_type') and ctx[layer_name].attn_type
-            in (AttentionType.DECODER, AttentionType.ENCODER_DECODER))
-    ]
-    layer_index_sorted = sorted(
-        set(
-            extract_layer_index(layer_name)
-            for layer_name in layer_need_kv_cache))
-    for layer_name in layer_need_kv_cache:
-        kv_cache_idx = layer_index_sorted.index(
-            extract_layer_index(layer_name))
-        forward_ctx = ctx[layer_name]
-        assert len(forward_ctx.kv_cache) == len(kv_cache)
-        for ve, ve_kv_cache in enumerate(kv_cache):
-            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+    # The original bind_kv_cache is replaced by bind_single_layer_kv_cache
+    # to accommodate the worker having a single cache engine.
+    # The worker will now loop through its layers and call bind_single_layer_kv_cache.
+    pass  # Placeholder for original content if needed, or can be removed.
 
+def bind_single_layer_kv_cache(
+    layer_static_ctx: Any,
+    layer_cache_tensor: torch.Tensor,
+    pipeline_stage_rank: int,
+    pipeline_parallel_size: int
+):
+    """Binds a single layer's KV cache tensor from a specific worker (pipeline stage)
+    into the layer's static forward context.
 
+    Args:
+        layer_static_ctx: The static forward context object for a specific layer
+                          (e.g., from CompilationConfig.static_forward_context[layer_name]).
+        layer_cache_tensor: The KV cache tensor for this layer from the specific worker.
+        pipeline_stage_rank: The rank of the worker/pipeline stage providing the cache.
+        pipeline_parallel_size: The total number of pipeline stages.
+    """
+    if not hasattr(layer_static_ctx, 'kv_cache') or \
+       not isinstance(layer_static_ctx.kv_cache, list) or \
+       (pipeline_parallel_size > 0 and len(layer_static_ctx.kv_cache) != pipeline_parallel_size):
+        # Initialize or resize the kv_cache list for this layer's context
+        # Only if pipeline_parallel_size > 0, otherwise it's a single tensor not a list.
+        if pipeline_parallel_size > 0:
+            layer_static_ctx.kv_cache = [None] * pipeline_parallel_size
+        else: # Should not happen if pp_size is correctly passed as > 0 for PP
+            layer_static_ctx.kv_cache = None
+    
+    if pipeline_parallel_size > 0:
+        layer_static_ctx.kv_cache[pipeline_stage_rank] = layer_cache_tensor
+    else: # Non-pipelined case, kv_cache is the tensor itself
+        layer_static_ctx.kv_cache = layer_cache_tensor
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
                kwargs: dict[str, Any]) -> Any:
     """
