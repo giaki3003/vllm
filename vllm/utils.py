@@ -2237,9 +2237,12 @@ def memory_profiling(
 
     yield result
 
+    logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before gc.collect() in finally.")
     gc.collect()
+    logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.empty_cache() in finally.")
     torch.cuda.empty_cache()
 
+    logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before result.after_profile.measure() in finally.")
     result.after_profile.measure()
 
     diff_profile = result.after_profile - result.before_profile
