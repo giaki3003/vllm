@@ -101,8 +101,10 @@ class ExecutorBase(ABC):
         appended to.
         """
         results = self.collective_rpc("determine_num_available_blocks")
+        logger.warning(f"[VRAM_DEBUG] Individual worker results for determine_num_available_blocks: {results}")
         a = min([r[0] for r in results])
         b = min([r[1] for r in results])
+        logger.warning(f"[VRAM_DEBUG] Min num_gpu_blocks (a): {a}, Min num_cpu_blocks (b): {b}")
         return a, b
 
     def initialize_cache(self, num_gpu_blocks: int, num_cpu_blocks) -> None:

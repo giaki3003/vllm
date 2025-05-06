@@ -958,6 +958,7 @@ def initialize_model_parallel(
         parallel_config = None
         model_hf_config = None
 
+    logger.error(f"[VRAM_FLAG_CHECK] In initialize_model_parallel: parallel_config.balance_pp_stages_by_vram = {parallel_config.balance_pp_stages_by_vram if parallel_config else 'None'}")
     if (parallel_config and parallel_config.balance_pp_stages_by_vram
             and pipeline_model_parallel_size > 1 and model_hf_config):
         # VRAM-aware layer distribution for pipeline parallelism
@@ -1060,6 +1061,7 @@ def initialize_model_parallel(
     # i.e. the `generate` call in the same DP group should be called together,
     # otherwise it will cause deadlock.
     # to get group_ranks for each dimension, transpose that dimension to the
+    
     # last dimension, then reshape to 2D, then unbind the last dimension
     all_ranks = torch.arange(world_size).reshape(
         -1, data_parallel_size, pipeline_model_parallel_size,

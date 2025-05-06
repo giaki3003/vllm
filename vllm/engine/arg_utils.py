@@ -1027,6 +1027,7 @@ class EngineArgs:
             tensor_parallel_size=self.tensor_parallel_size,
             data_parallel_size=self.data_parallel_size,
             enable_expert_parallel=self.enable_expert_parallel,
+            balance_pp_stages_by_vram=self.balance_pp_stages_by_vram,
             max_parallel_loading_workers=self.max_parallel_loading_workers,
             disable_custom_all_reduce=self.disable_custom_all_reduce,
             ray_workers_use_nsight=self.ray_workers_use_nsight,
