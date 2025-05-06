@@ -653,30 +653,61 @@ set(VLLM_MOE_EXT_SRC
   "csrc/moe/moe_align_sum_kernels.cu"
   "csrc/moe/topk_softmax_kernels.cu")
 
-if(VLLM_GPU_LANG STREQUAL "CUDA")
-  list(APPEND VLLM_MOE_EXT_SRC "csrc/moe/moe_wna16.cu")
+if(VLLM_GPU_LANG STREQUAL "CUDA") # Guard this, as it's CUDA specific
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_MOE_EXT_SRC}"
+      CUDA_ARCHS "${CUDA_ARCHS}")
 endif()
 
-set_gencode_flags_for_srcs(
-  SRCS "${VLLM_MOE_EXT_SRC}"
-  CUDA_ARCHS "${CUDA_ARCHS}")
 
+# This is your main conditional block for CUDA features
 if(VLLM_GPU_LANG STREQUAL "CUDA")
-  set(VLLM_MOE_WNA16_SRC
-    "csrc/moe/moe_wna16.cu")
 
-  set_gencode_flags_for_srcs(
-    SRCS "${VLLM_MOE_WNA16_SRC}"
-    CUDA_ARCHS "${CUDA_ARCHS}")
+  # --- Logic for VLLM_MOE_WNA16_SRC (SM 7.0+ specific) ---
+  set(VLLM_MOE_WNA16_COMPATIBLE_ARCHS "")
+  set(SHOULD_COMPILE_VLLM_MOE_WNA16 FALSE)
 
-  list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_SRC}")
+  if(CUDA_ARCHS) # CUDA_ARCHS should be the list of architectures to build for (e.g., "6.1")
+    foreach(ARCH ${CUDA_ARCHS})
+      string(REGEX MATCH "^([0-9]+)" MAJOR_VERSION_MATCH "${ARCH}")
+      set(MAJOR_VERSION "${CMAKE_MATCH_1}")
+
+      if(MAJOR_VERSION VERSION_GREATER_EQUAL "7")
+        list(APPEND VLLM_MOE_WNA16_COMPATIBLE_ARCHS ${ARCH})
+        set(SHOULD_COMPILE_VLLM_MOE_WNA16 TRUE)
+      endif()
+    endforeach()
+  else()
+    message(STATUS "CUDA_ARCHS is not defined or empty. SM 7.0+ specific MOE sources (like moe_wna16.cu) will not be compiled.")
+  endif()
+
+  if(SHOULD_COMPILE_VLLM_MOE_WNA16) # This is TRUE only if SM 7.0+ is targeted
+    message(STATUS "Compatible CUDA archs (>= 7.0) found: ${VLLM_MOE_WNA16_COMPATIBLE_ARCHS}. Enabling moe_wna16.cu.")
+    
+    # Define the path to the specific .cu file
+    set(VLLM_MOE_WNA16_CU_FILE_PATH "csrc/moe/moe_wna16.cu")
+
+    # Set gencode flags *specifically for this file* using *only compatible architectures*
+    set_gencode_flags_for_srcs(
+      SRCS "${VLLM_MOE_WNA16_CU_FILE_PATH}" # SRCS can be a single file string or a list
+      CUDA_ARCHS "${VLLM_MOE_WNA16_COMPATIBLE_ARCHS}")
+
+    # NOW, conditionally append this file to the main source list
+    list(APPEND VLLM_MOE_EXT_SRC "${VLLM_MOE_WNA16_CU_FILE_PATH}") # << CORRECT PLACE TO ADD
+
+    # Add the C++ preprocessor definition
+    add_compile_definitions(VLLM_ENABLE_MOE_WNA16_CUDA70_PLUS)
+    message(STATUS "VLLM_ENABLE_MOE_WNA16_CUDA70_PLUS defined GLOBALLY as CUDA Arch >= 7.0 condition met.")
+  else()
+    message(STATUS "No CUDA archs with compute capability >= 7.0 found in '${CUDA_ARCHS}'. 'csrc/moe/moe_wna16.cu' will NOT be compiled.")
+  endif()
+  # --- END OF VLLM_MOE_WNA16_SRC specific logic ---
+
+  # --- Marlin MOE Logic (from your original script) ---
+  # This section should correctly append its sources to VLLM_MOE_EXT_SRC if conditions are met
   cuda_archs_loose_intersection(MARLIN_MOE_ARCHS "8.0;8.6;8.7;8.9;9.0;10.0;10.1;12.0" "${CUDA_ARCHS}")
   if (MARLIN_MOE_ARCHS)
-
-    #
-    # For the Marlin MOE kernels we automatically generate sources for various
-    # preselected input type pairs and schedules.
-    # Generate sources:
+    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
     set(MOE_MARLIN_GEN_SCRIPT
       ${CMAKE_CURRENT_SOURCE_DIR}/csrc/moe/marlin_moe_wna16/generate_kernels.py)
     file(MD5 ${MOE_MARLIN_GEN_SCRIPT} MOE_MARLIN_GEN_SCRIPT_HASH)
@@ -688,7 +719,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
         OR NOT $CACHE{MOE_MARLIN_GEN_SCRIPT_HASH} STREQUAL ${MOE_MARLIN_GEN_SCRIPT_HASH})
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env
-        PYTHONPATH=$PYTHONPATH
+        PYTHONPATH=$PYTHONPATH # This is correct for use with 'cmake -E env'
           ${Python_EXECUTABLE} ${MOE_MARLIN_GEN_SCRIPT}
         RESULT_VARIABLE moe_marlin_generation_result
         OUTPUT_VARIABLE moe_marlin_generation_output
@@ -698,9 +729,9 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
 
       if (NOT moe_marlin_generation_result EQUAL 0)
         message(FATAL_ERROR "Marlin MOE generation failed."
-                            " Result: \"${moe_marlin_generation_result}\""
-                            "\nCheck the log for details: "
-                            "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
+                              " Result: \"${moe_marlin_generation_result}\""
+                              "\nCheck the log for details: "
+                              "${CMAKE_CURRENT_BINARY_DIR}/moe_marlin_generation.log")
       else()
         set(MOE_MARLIN_GEN_SCRIPT_HASH ${MOE_MARLIN_GEN_SCRIPT_HASH}
             CACHE STRING "Last run Marlin MOE generate script hash" FORCE)
@@ -715,14 +746,12 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
       SRCS "${MOE_WNAA16_MARLIN_SRC}"
       CUDA_ARCHS "${MARLIN_MOE_ARCHS}")
 
-    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC})
-
-    message(STATUS "Building Marlin MOE kernels for archs: ${MARLIN_MOE_ARCHS}")
+    list(APPEND VLLM_MOE_EXT_SRC ${MOE_WNAA16_MARLIN_SRC}) # Append Marlin sources
   else()
-    message(STATUS "Not building Marlin MOE kernels as no compatible archs found"
-                   " in CUDA target architectures")
+    message(STATUS "Not building Marlin MOE kernels as no compatible archs (>= 8.0 and in CUDA_ARCHS)"
+                     " found in CUDA target architectures: ${CUDA_ARCHS}")
   endif()
-endif()
+endif() # End of main if(VLLM_GPU_LANG STREQUAL "CUDA")
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   set(MOE_PERMUTE_SRC
