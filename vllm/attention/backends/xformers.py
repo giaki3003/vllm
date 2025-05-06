@@ -386,11 +386,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         alibi_slopes: Optional[List[float]],
         sliding_window: Optional[int],
         kv_cache_dtype: str,
+        block_size: int, # Added block_size
         blocksparse_params: Optional[Dict[str, Any]] = None,
         logits_soft_cap: Optional[float] = None,
         attn_type: str = AttentionType.DECODER,
         use_irope: bool = False,
     ) -> None:
+        self.block_size = block_size # Store block_size
         if blocksparse_params is not None:
             raise ValueError(
                 "XFormers does not support block-sparse attention.")
@@ -484,6 +486,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             shape = [num_tokens, num_heads * head_size]
         """
         attn_type = self.attn_type
+
+        # Initialize py_key_cache and py_value_cache to None at the beginning of the method scope
+        py_key_cache: Optional[torch.Tensor] = None
+        py_value_cache: Optional[torch.Tensor] = None
+        reshaped_py_key_cache: Optional[torch.Tensor] = None
+        reshaped_py_value_cache: Optional[torch.Tensor] = None
+
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
         if (attn_type == AttentionType.ENCODER
@@ -515,93 +524,126 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # during encoder attention.
             #
             # Even if there are no new key/value pairs to cache,
-            # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
+            # The input `kv_cache` is the combined K/V tensor for this layer/stage.
+            # py_key_cache and py_value_cache are already initialized to None above.
+            # This block will assign to them if conditions are met.
+            if kv_cache is not None and kv_cache.numel() > 0:
+                # CacheEngine provides kv_cache with shape (2, num_blocks, elements_per_block)
+                # where dim 0 is for K and V.
+                if kv_cache.ndim > 0 and kv_cache.shape[0] == 2: # Check dim 0 for K/V split
+                    py_key_cache = kv_cache.select(0, 0).clone() # Select from dim 0
+                    py_value_cache = kv_cache.select(0, 1).clone() # Select from dim 0
+                else:
+                    logger.warning(
+                        "kv_cache tensor in XFormersBackend.forward received with "
+                        f"unexpected shape {kv_cache.shape} (expected dim 0 to be 2 for K/V). "
+                        "Cannot split into K and V. This might be an issue if prefill/decode relies on split cache.")
+            # If kv_cache was None, or numel was 0, or shape was wrong,
+            # py_key_cache/py_value_cache remain None (their initial value).
 
-            if (key is not None) and (value is not None):
+            # Determine x (vectorization factor)
+            # x must be determined based on the element type of the K/V tensors, not the cache itself if it's packed (e.g. uint8 for fp4)
+            # However, for fp16/bf16/fp32 direct storage, cache element_size is fine.
+            # Given the PagedAttention.split_kv_cache logic, it's based on the target cache tensor's element size.
+            # Let's assume `key` (the input tensor, not the cache) is representative of the unpacked type.
+            if key is not None:
+                 # Ensure key is a tensor and not None before accessing element_size
+                x = 16 // key.element_size()
+            elif py_key_cache is not None and py_key_cache.numel() > 0 : # Fallback to py_key_cache if key is None (e.g. cross-attn decode)
+                # This assumes py_key_cache stores elements directly, not packed.
+                # If it's a raw buffer that's further processed, this might be wrong.
+                # However, PagedAttention.split_kv_cache uses kv_cache.element_size()
+                # which implies the cache tensor itself reflects the type for x calculation.
+                x = 16 // py_key_cache.element_size()
+            else:
+                logger.warning("Cannot determine element size for x calculation. Defaulting x to 8 (for fp16/bf16). This might be incorrect if using fp32 or other types.")
+                x = 8 # Default for fp16/bf16
 
+            reshaped_py_key_cache: Optional[torch.Tensor] = None
+            if py_key_cache is not None:
+                num_blocks_key = py_key_cache.shape[0]
+                # Expected flat elements per block for key: self.num_kv_heads * self.head_size * self.block_size
+                # Target shape: (num_blocks_key, self.num_kv_heads, self.head_size // x, self.block_size, x)
+                if self.head_size % x != 0:
+                    raise ValueError(f"head_size ({self.head_size}) must be divisible by x ({x}) for key cache reshaping.")
+                try:
+                    reshaped_py_key_cache = py_key_cache.view(num_blocks_key,
+                                                              self.num_kv_heads,
+                                                              self.head_size // x,
+                                                              self.block_size,
+                                                              x)
+                except RuntimeError as e:
+                    raise RuntimeError(
+                        f"Failed to reshape py_key_cache from {py_key_cache.shape} to "
+                        f"({num_blocks_key}, {self.num_kv_heads}, {self.head_size // x}, {self.block_size}, {x}). "
+                        f"Original error: {e}. Check if flat_elements_per_block matches product of target dims.")
+
+            reshaped_py_value_cache: Optional[torch.Tensor] = None
+            if py_value_cache is not None:
+                num_blocks_value = py_value_cache.shape[0]
+                # Expected flat elements per block for value: self.num_kv_heads * self.head_size * self.block_size
+                # Target shape: (num_blocks_value, self.num_kv_heads, self.head_size, self.block_size)
+                try:
+                    reshaped_py_value_cache = py_value_cache.view(num_blocks_value,
+                                                                  self.num_kv_heads,
+                                                                  self.head_size,
+                                                                  self.block_size)
+                except RuntimeError as e:
+                    raise RuntimeError(
+                        f"Failed to reshape py_value_cache from {py_value_cache.shape} to "
+                        f"({num_blocks_value}, {self.num_kv_heads}, {self.head_size}, {self.block_size}). "
+                        f"Original error: {e}. Check if flat_elements_per_block matches product of target dims.")
+
+            if (key is not None) and (value is not None): # This block is for writing to cache
                 if attn_type == AttentionType.ENCODER_DECODER:
-                    # Update cross-attention KV cache (prefill-only)
-                    # During cross-attention decode, key & value will be None,
-                    # preventing this IF-statement branch from running
                     updated_slot_mapping = attn_metadata.cross_slot_mapping
                 else:
-                    # Update self-attention KV cache (prefill/decode)
                     updated_slot_mapping = attn_metadata.slot_mapping
-
-                # Reshape the input keys and values and store them in the cache.
-                # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory
-                # profiling run.
-                # kv_cache here is the combined K/V tensor for the layer/stage.
-                # PagedAttention.write_to_paged_cache expects separate key_cache and value_cache.
                 
-                # Initialize python local variables for key and value caches
-                py_key_cache: Optional[torch.Tensor] = None
-                py_value_cache: Optional[torch.Tensor] = None
-
-                if kv_cache is not None and kv_cache.numel() > 0 :
-                    # Assuming kv_cache shape is (num_blocks, 2, block_size, num_kv_heads, head_size)
-                    # where dim 1 is for K and V.
-                    # Ensure it has at least 2 dimensions and the 2nd dim size is 2.
-                    if kv_cache.ndim > 1 and kv_cache.shape[1] == 2:
-                        py_key_cache = kv_cache.select(1, 0)
-                        py_value_cache = kv_cache.select(1, 1)
-                    else:
-                        # This case should not happen if CacheEngine provides the expected format.
-                        # Log a warning or raise an error.
-                        logger.warning("kv_cache tensor in XFormersBackend does not have the expected shape for K/V splitting.")
-                        # Fallback: PagedAttention ops might handle None if this is a true first prefill.
-                        # Or, this indicates a deeper issue. For now, they remain None.
-                
-                PagedAttention.write_to_paged_cache(
-                    key, value, py_key_cache, py_value_cache, updated_slot_mapping,
-                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                if reshaped_py_key_cache is not None and reshaped_py_value_cache is not None:
+                    # Ensure self.block_size is a valid integer > 0 (already checked by view operations implicitly)
+                    if not (isinstance(self.block_size, int) and self.block_size > 0):
+                         raise ValueError(f"XFormersImpl.block_size is invalid: {self.block_size}. "
+                                          "It must be a positive integer, likely from CacheConfig.")
+                    PagedAttention.write_to_paged_cache(
+                        key, value, reshaped_py_key_cache, reshaped_py_value_cache, updated_slot_mapping,
+                        self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                # else:
+                    # logger.debug("Skipping PagedAttention.write_to_paged_cache as derived/reshaped key/value cache is None.")
+        # If the outer condition (line 519 in original file) was false,
+        # or if kv_cache was not splittable, py_key_cache/py_value_cache (and thus reshaped versions) are still None.
         
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
         output = torch.empty_like(query)
-        # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_query_tokens:]
-        # QKV for prefill.
         query = query[:num_prefill_query_tokens]
-        if key is not None and value is not None:
+        if key is not None and value is not None: # These are current key/value, not cache
             key = key[:num_prefill_kv_tokens]
             value = value[:num_prefill_kv_tokens]
 
         assert query.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
         
-        # Define py_key_cache and py_value_cache again for prefill/decode sections
-        # based on the input kv_cache argument.
-        py_key_cache: Optional[torch.Tensor] = None
-        py_value_cache: Optional[torch.Tensor] = None
-        if kv_cache is not None and kv_cache.numel() > 0:
-            if kv_cache.ndim > 1 and kv_cache.shape[1] == 2:
-                py_key_cache = kv_cache.select(1, 0)
-                py_value_cache = kv_cache.select(1, 1)
-            else:
-                logger.warning("kv_cache tensor in XFormersBackend (prefill/decode) does not have the expected shape for K/V splitting.")
+        # reshaped_py_key_cache and reshaped_py_value_cache were defined and potentially populated above.
+        # They are used below.
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if (py_key_cache is None or py_key_cache.numel() == 0 or # Check split cache
+            if (reshaped_py_key_cache is None or reshaped_py_value_cache is None or
+                reshaped_py_key_cache.numel() == 0 or reshaped_py_value_cache.numel() == 0 or
                 prefill_meta.block_tables.numel() == 0):
-                # normal attention.
-                # block tables are empty if the prompt does not have a cached
-                # prefix.
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
             else:
-                assert attn_type != AttentionType.ENCODER_ONLY, (
-                    "Encoder-only models should not have prefix attention.")
-
+                # Prefill with paged attention (prefix caching)
+                assert attn_type != AttentionType.ENCODER_ONLY, \
+                    "Encoder-only models should not have prefix attention."
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 
@@ -610,8 +652,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     key,
                     value,
                     self.kv_cache_dtype,
-                    py_key_cache, # Use split key cache
-                    py_value_cache, # Use split value cache
+                    reshaped_py_key_cache, # Pass 5D key cache
+                    reshaped_py_value_cache, # Pass 4D value cache
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
@@ -634,14 +676,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
             
-            # Ensure py_key_cache and py_value_cache are not None for decode
-            if py_key_cache is None or py_value_cache is None:
-                raise RuntimeError("KV cache is None in decode phase, which is not expected.")
+            if reshaped_py_key_cache is None or reshaped_py_value_cache is None:
+                raise RuntimeError(
+                    "Reshaped KV cache (reshaped_py_key_cache or reshaped_py_value_cache) is None or empty in decode phase, "
+                    "which is not expected. Input kv_cache might have been None or unsplittable.")
 
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
-                py_key_cache, # Use split key cache
-                py_value_cache, # Use split value cache
+                reshaped_py_key_cache, # Pass 5D key cache
+                reshaped_py_value_cache, # Pass 4D value cache
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,

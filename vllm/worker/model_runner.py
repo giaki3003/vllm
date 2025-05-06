@@ -1611,6 +1611,28 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                             is_encoder_decoder))
                     # Disable KV Scale Calculation for graph capture
                     attn_metadata.enable_kv_scales_calculation = False
+
+                    # Check if KV cache for this stage is valid for decode capture
+                    current_stage_kv_cache_list = kv_caches[virtual_engine] # This is List[Tensor_5D] or None
+                    
+                    # Note: attn_metadata.decode_metadata is a property that computes based on num_decode_tokens > 0
+                    # We are primarily concerned with decode captures.
+                    # A more direct check might be if this batch_size implies a decode-only scenario.
+                    # For simplicity, if decode_metadata would be true AND cache is bad, skip.
+                    # The graph capture is primarily for decode, so if decode_metadata is None, it's likely a prefill-like capture.
+                    
+                    is_decode_capture_attempt = False
+                    if attn_metadata.num_decode_tokens > 0 and attn_metadata.num_prefills == 0:
+                        is_decode_capture_attempt = True
+
+                    if is_decode_capture_attempt and \
+                       (current_stage_kv_cache_list is None or \
+                        not all(t.numel() > 0 for t in current_stage_kv_cache_list if t is not None)):
+                        logger.info(f"Skipping CUDAGraph capture for decode on VE {virtual_engine}, "
+                                    f"batch_size {batch_size}, use_inputs_embeds {use_inputs_embeds} "
+                                    f"due to empty or None KV cache for this stage.")
+                        continue # Skip this specific capture case
+
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
                             **dict(index_mapping=[dummy_lora_id] * batch_size,
