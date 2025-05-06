@@ -258,6 +258,7 @@ class EngineArgs:
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     data_parallel_size: int = ParallelConfig.data_parallel_size
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
+    balance_pp_stages_by_vram: bool = ParallelConfig.balance_pp_stages_by_vram
     max_parallel_loading_workers: Optional[
         int] = ParallelConfig.max_parallel_loading_workers
     block_size: Optional[BlockSize] = CacheConfig.block_size
@@ -561,6 +562,9 @@ class EngineArgs:
         parallel_group.add_argument(
             "--enable-expert-parallel",
             **parallel_kwargs["enable_expert_parallel"])
+        parallel_group.add_argument(
+            "--balance-pp-stages-by-vram",
+            **parallel_kwargs["balance_pp_stages_by_vram"])
         parallel_group.add_argument(
             "--max-parallel-loading-workers",
             **parallel_kwargs["max_parallel_loading_workers"])
