@@ -74,11 +74,6 @@ class PagedAttention:
         k_scale: torch.Tensor,
         v_scale: torch.Tensor,
     ) -> None:
-        print(f"Shape of key: {key.shape}")
-        print(f"Shape of value: {value.shape}")
-        print(f"Shape of key_cache: {key_cache.shape}")
-        print(f"Shape of value_cache: {value_cache.shape}")
-        print(f"Shape of slot_mapping: {slot_mapping.shape}")
         ops.reshape_and_cache(
             key,
             value,
