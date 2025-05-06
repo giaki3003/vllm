@@ -1612,26 +1612,26 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     # Disable KV Scale Calculation for graph capture
                     attn_metadata.enable_kv_scales_calculation = False
 
-                    # Check if KV cache for this stage is valid for decode capture
-                    current_stage_kv_cache_list = kv_caches[virtual_engine] # This is List[Tensor_5D] or None
-                    
-                    # Note: attn_metadata.decode_metadata is a property that computes based on num_decode_tokens > 0
-                    # We are primarily concerned with decode captures.
-                    # A more direct check might be if this batch_size implies a decode-only scenario.
-                    # For simplicity, if decode_metadata would be true AND cache is bad, skip.
-                    # The graph capture is primarily for decode, so if decode_metadata is None, it's likely a prefill-like capture.
-                    
-                    is_decode_capture_attempt = False
-                    if attn_metadata.num_decode_tokens > 0 and attn_metadata.num_prefills == 0:
-                        is_decode_capture_attempt = True
-
-                    if is_decode_capture_attempt and \
-                       (current_stage_kv_cache_list is None or \
-                        not all(t.numel() > 0 for t in current_stage_kv_cache_list if t is not None)):
-                        logger.info(f"Skipping CUDAGraph capture for decode on VE {virtual_engine}, "
-                                    f"batch_size {batch_size}, use_inputs_embeds {use_inputs_embeds} "
-                                    f"due to empty or None KV cache for this stage.")
-                        continue # Skip this specific capture case
+                    # # Check if KV cache for this stage is valid for decode capture
+                    # current_stage_kv_cache_list = kv_caches[virtual_engine] # This is List[Tensor_5D] or None
+                    #
+                    # # Note: attn_metadata.decode_metadata is a property that computes based on num_decode_tokens > 0
+                    # # We are primarily concerned with decode captures.
+                    # # A more direct check might be if this batch_size implies a decode-only scenario.
+                    # # For simplicity, if decode_metadata would be true AND cache is bad, skip.
+                    # # The graph capture is primarily for decode, so if decode_metadata is None, it's likely a prefill-like capture.
+                    #
+                    # is_decode_capture_attempt = False
+                    # if attn_metadata.num_decode_tokens > 0 and attn_metadata.num_prefills == 0:
+                    #     is_decode_capture_attempt = True
+                    #
+                    # if is_decode_capture_attempt and \
+                    #    (current_stage_kv_cache_list is None or \
+                    #     not all(t.numel() > 0 for t in current_stage_kv_cache_list if t is not None)):
+                    #     logger.info(f"Skipping CUDAGraph capture for decode on VE {virtual_engine}, "
+                    #                 f"batch_size {batch_size}, use_inputs_embeds {use_inputs_embeds} "
+                    #                 f"due to empty or None KV cache for this stage.")
+                    #     continue # Skip this specific capture case
 
                     if self.lora_config:
                         lora_mapping = LoRAMapping(
@@ -1829,6 +1829,15 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert model_input.input_tokens is not None
             graph_batch_size = model_input.input_tokens.shape[0]
             use_inputs_embeds = model_input.inputs_embeds is not None
+            # ---- START DEBUG PRINTS for execute_model ----
+            graph_lookup_key = (graph_batch_size, use_inputs_embeds)
+            print(f"[DEBUG EXECUTE] In execute_model, virtual_engine: {virtual_engine}")
+            print(f"[DEBUG EXECUTE] Looking up graph with key: {graph_lookup_key}")
+            if virtual_engine in self.graph_runners:
+                print(f"[DEBUG EXECUTE] Available keys for VE {virtual_engine}: {list(self.graph_runners[virtual_engine].keys())}")
+            else:
+                print(f"[DEBUG EXECUTE] No graphs captured for VE {virtual_engine} at all.")
+            # ---- END DEBUG PRINTS for execute_model ----
             model_executable = self.graph_runners[virtual_engine][(
                 graph_batch_size, use_inputs_embeds)]
             if previous_hidden_states is not None:
