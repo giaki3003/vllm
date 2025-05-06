@@ -222,8 +222,9 @@ class Worker(LocalOrDistributedWorkerBase):
             tensorizer_config=tensorizer_config, )
 
     @torch.inference_mode()
-    logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Starting determine_num_available_blocks.")
+    
     def determine_num_available_blocks(self) -> Tuple[int, int]:
+        logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Starting determine_num_available_blocks.")
         """Profiles the peak memory usage of the model to determine how many
         KV blocks may be allocated without OOMs.
 
