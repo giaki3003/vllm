@@ -1713,6 +1713,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         # This usually takes < 10 seconds.
         logger.info("Graph capturing finished in %.0f secs, took %.2f GiB",
                     elapsed_time, cuda_graph_size / GiB_bytes)
+        print(f"[DEBUG LIFECYCLE] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 else 0}: EXITING capture_model. ID of self.graph_runners: {id(self.graph_runners)}, Keys for VE 0: {list(self.graph_runners[0].keys()) if 0 < len(self.graph_runners) and self.graph_runners[0] is not None else 'VE 0 empty/None/N/A'}, Keys for VE 1: {list(self.graph_runners[1].keys()) if 1 < len(self.graph_runners) and self.graph_runners[1] is not None else 'VE 1 empty/None/N/A'}")
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
                                                     capture_inputs: Dict[str,
@@ -1835,10 +1836,12 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             graph_batch_size = model_input.input_tokens.shape[0]
             use_inputs_embeds = model_input.inputs_embeds is not None
             # ---- START DEBUG PRINTS for execute_model ----
+            # This print was already added in a previous step, ensuring it's correctly placed / not duplicated.
+            # print(f"[DEBUG LIFECYCLE] In execute_model, Worker rank {get_tensor_model_parallel_rank()}, PP Rank {get_pp_group().rank_in_group() if self.parallel_config.pipeline_parallel_size > 1 else 0}. ID of self.graph_runners: {id(self.graph_runners)}")
             graph_lookup_key = (graph_batch_size, use_inputs_embeds)
-            print(f"[DEBUG EXECUTE] In execute_model, virtual_engine: {virtual_engine}")
-            print(f"[DEBUG EXECUTE] Looking up graph with key: {graph_lookup_key}")
-            if virtual_engine in self.graph_runners:
+            print(f"[DEBUG EXECUTE] In execute_model, virtual_engine: {virtual_engine}") # This was already present
+            print(f"[DEBUG EXECUTE] Looking up graph with key: {graph_lookup_key}") # This was already present
+            if virtual_engine in self.graph_runners: # This was already present
                 print(f"[DEBUG EXECUTE] Available keys for VE {virtual_engine}: {list(self.graph_runners[virtual_engine].keys())}")
             else:
                 print(f"[DEBUG EXECUTE] No graphs captured for VE {virtual_engine} at all.")
