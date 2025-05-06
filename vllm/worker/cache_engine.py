@@ -27,6 +27,7 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
+        num_layers_on_this_stage: int,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -35,8 +36,9 @@ class CacheEngine:
 
         self.head_size = model_config.get_head_size()
         # Models like Jamba, have mixed typed layers, E.g Mamba
-        self.num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
+        self.num_attention_layers = num_layers_on_this_stage
+        # Add a log to confirm
+        logger.info(f"[CACHE_ENGINE_INIT_DEBUG] Initializing CacheEngine with num_attention_layers = {self.num_attention_layers} (from num_layers_on_this_stage)")
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size

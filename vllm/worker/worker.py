@@ -25,6 +25,7 @@ from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
 from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
+from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -387,6 +388,46 @@ class Worker(LocalOrDistributedWorkerBase):
     @property
     def kv_cache(self) -> Optional[List[List[torch.Tensor]]]:
         return self.gpu_cache
+        num_present_layers = 0
+        # Ensure model and layers attribute exist and are of expected type
+        if hasattr(self.model_runner, 'model') and \
+           hasattr(self.model_runner.model, 'layers') and \
+           isinstance(self.model_runner.model.layers, torch.nn.ModuleList):
+            for layer in self.model_runner.model.layers:
+                if not isinstance(layer, PPMissingLayer):
+                    num_present_layers += 1
+            if num_present_layers == 0 and len(self.model_runner.model.layers) > 0:
+                logger.warning(f"Worker rank {self.rank}: All layers in model_runner.model.layers are PPMissingLayer. Defaulting to total model layers for CacheEngine.")
+                num_present_layers = self.model_config.get_num_layers(self.parallel_config)
+        else:
+            num_present_layers = self.model_config.get_num_layers(self.parallel_config)
+            logger.warning(
+                f"Worker rank {self.rank}: Could not determine present layers from "
+                f"model_runner.model.layers. Using total model layers {num_present_layers} "
+                f"for CacheEngine. This might be incorrect for PP if this worker is a stage."
+            )
+
+        if num_present_layers == 0: # Should be at least 1 if this worker has any useful part of the model
+            logger.warning(
+                f"Worker rank {self.rank}: num_present_layers is 0 after checks. "
+                f"Defaulting to total model layers {self.model_config.get_num_layers(self.parallel_config)} "
+                f"for CacheEngine initialization. This worker might not need a full KV cache."
+            )
+            num_present_layers = self.model_config.get_num_layers(self.parallel_config)
+            if num_present_layers == 0 : num_present_layers = 1 # Final fallback to avoid division by zero if total layers is also 0
+
+        logger.error(f"[CACHE_ENGINE_DEBUG] Worker rank {self.rank}: num_present_layers for this worker = {num_present_layers}")
+        assert self.cache_config.num_gpu_blocks is not None
+        self.cache_engine = [
+            CacheEngine(self.cache_config, self.model_config,
+                        self.parallel_config, self.device_config,
+                        num_layers_on_this_stage=num_present_layers) # Modified call
+            for _ in range(self.parallel_config.pipeline_parallel_size)
+        ]
+        self.gpu_cache = [
+            self.cache_engine[ve].gpu_cache
+            for ve in range(self.parallel_config.pipeline_parallel_size)
+        ]
 
     @torch.inference_mode()
     def prepare_worker_input(
