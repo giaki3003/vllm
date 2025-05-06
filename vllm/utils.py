@@ -2125,6 +2125,13 @@ class MemorySnapshot:
         # `torch.cuda.memory_reserved()` will keep growing, and only shrink
         # when we call `torch.cuda.empty_cache()` or OOM happens.
         logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.memory_stats().get()")
+        try:
+            current_device = torch.cuda.current_device()
+            logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Synchronizing device {current_device} before memory_stats.")
+            torch.cuda.synchronize()
+            logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Synchronization done for device {current_device}.")
+        except Exception as e:
+            logger.error(f"[MEMORY_SNAPSHOT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Error during synchronization: {e}")
         self.torch_peak = torch.cuda.memory_stats().get(
             "allocated_bytes.all.peak", 0)
 
