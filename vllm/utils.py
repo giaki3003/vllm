@@ -2238,7 +2238,8 @@ def memory_profiling(
     yield result
 
     logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before gc.collect() in finally.")
-    gc.collect()
+    # gc.collect() # Temporarily commented out for debugging hang
+    logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: gc.collect() in finally SKIPPED.")
     logger.error(f"[MEMORY_PROFILE_EXIT_DEBUG] Worker rank {torch.distributed.get_rank() if torch.distributed.is_initialized() else 'N/A'}: Before torch.cuda.empty_cache() in finally.")
     torch.cuda.empty_cache()
 
