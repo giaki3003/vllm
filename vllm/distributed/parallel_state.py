@@ -980,8 +980,11 @@ def initialize_model_parallel(
         if parallel_config.balance_pp_stages_by_vram: # Check again in case it was disabled due to error
             world_group_for_vram = get_world_group()
             # Gather (global_rank, vram) from all ranks in the world
-            all_vrams_data = world_group_for_vram.all_gather_object(
-                [rank, current_gpu_vram])
+            object_to_gather = [rank, current_gpu_vram]
+            gathered_vram_data = [None for _ in range(world_group_for_vram.world_size)]
+            torch.distributed.all_gather_object(gathered_vram_data, object_to_gather, group=world_group_for_vram.cpu_group)
+            all_vrams_data = gathered_vram_data # Keep variable name consistent with subsequent code
+            
             all_vrams_map = {r: v for r, v in all_vrams_data}
 
             # Temporarily reshape all_ranks to find pipeline peers easily
