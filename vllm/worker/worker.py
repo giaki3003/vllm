@@ -464,7 +464,7 @@ class Worker(LocalOrDistributedWorkerBase):
                 # If this path is taken, it means tensor_parallel_size is > len(self.cache_engine)
                 # which contradicts earlier logic.
                 self.gpu_cache.append(None) # Or handle error more gracefully
-        ]
+        # Stray ']' removed from here
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache)
 
