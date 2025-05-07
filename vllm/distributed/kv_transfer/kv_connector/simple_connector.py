@@ -22,7 +22,7 @@ from vllm.logger import init_logger
 from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
-    from vllm.worker.gpu_model_inputs import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 

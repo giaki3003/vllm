@@ -35,7 +35,7 @@ PAD_SLOT_ID = -1
 _COMPUTE_SLOT_MAPPING_NUMPY_NUMEL = 256
 
 if TYPE_CHECKING:
-    from vllm.worker.gpu_model_inputs import ModelInputForGPUBuilder
+    from vllm.worker.model_runner import ModelInputForGPUBuilder
 
 
 def is_block_tables_empty(block_tables: Union[None, Dict]):

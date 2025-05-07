@@ -46,8 +46,8 @@ from vllm.utils import (async_tensor_h2d, get_kv_cache_torch_dtype,
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
-    from vllm.worker.gpu_model_inputs import (ModelInputForGPUBuilder,
-                                              ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
 
 FLASHINFER_KV_CACHE_LAYOUT: str = os.getenv("FLASHINFER_KV_CACHE_LAYOUT",
                                             "NHD").upper()

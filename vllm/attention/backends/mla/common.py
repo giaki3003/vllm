@@ -235,8 +235,8 @@ except ImportError:
         flash_attn_varlen_func = None
 
 if TYPE_CHECKING:
-    from vllm.worker.gpu_model_inputs import (ModelInputForGPUBuilder,
-                                              ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
+                                          ModelInputForGPUWithSamplingMetadata)
 
 is_hip = current_platform.is_rocm()
 
