@@ -18,7 +18,7 @@ from vllm.attention.ops.flashmla import (flash_mla_with_kvcache,
                                          is_flashmla_supported)
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.gpu_model_inputs import ModelInputForGPUWithSamplingMetadata
 
 
 class FlashMLABackend(MLACommonBackend):

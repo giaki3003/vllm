@@ -20,7 +20,7 @@ from vllm.attention.ops.rocm_aiter_mla import (aiter_mla_decode_fwd,
                                                get_aiter_mla_metadata)
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUBuilder
+    from vllm.worker.gpu_model_inputs import ModelInputForGPUBuilder
 
 
 def is_aiter_mla_enabled() -> bool:

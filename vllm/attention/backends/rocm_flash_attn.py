@@ -21,7 +21,7 @@ from vllm.platforms import current_platform
 from vllm.platforms.rocm import use_rocm_custom_paged_attention
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.gpu_model_inputs import ModelInputForGPUWithSamplingMetadata
 
 logger = init_logger(__name__)
 _PARTITION_SIZE_ROCM = 256

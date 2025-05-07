@@ -17,7 +17,7 @@ from vllm.sequence import IntermediateTensors
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.gpu_model_inputs import ModelInputForGPUWithSamplingMetadata
 
 
 class KVConnectorBase(ABC):

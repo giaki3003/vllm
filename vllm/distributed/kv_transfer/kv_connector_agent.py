@@ -8,7 +8,7 @@ This implementation is a shim wrapper on two APIs exposed by `kv_connector`:
 from typing import TYPE_CHECKING, List, Tuple, Union
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import ModelInputForGPUWithSamplingMetadata
+    from vllm.worker.gpu_model_inputs import ModelInputForGPUWithSamplingMetadata
     from vllm.config import VllmConfig
 
 import torch

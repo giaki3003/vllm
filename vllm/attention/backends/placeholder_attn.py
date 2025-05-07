@@ -14,8 +14,8 @@ from vllm.attention.backends.utils import CommonAttentionState
 from vllm.multimodal import MultiModalPlaceholderMap
 
 if TYPE_CHECKING:
-    from vllm.worker.model_runner import (ModelInputForGPUBuilder,
-                                          ModelInputForGPUWithSamplingMetadata)
+    from vllm.worker.gpu_model_inputs import (ModelInputForGPUBuilder,
+                                              ModelInputForGPUWithSamplingMetadata)
 from vllm.utils import async_tensor_h2d
 
 # Placeholder attention backend for models like Mamba and pooling models that
