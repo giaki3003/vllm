@@ -236,20 +236,8 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
 
         if use_captured_graph:
             self.slot_mapping.extend([PAD_SLOT_ID] * cuda_graph_pad_size)
-            # Corrected block_tables padding
-            for _ in range(cuda_graph_pad_size):
-                self.block_tables.append([])
-
-            # Conditionally set num_decode_tokens for CUDA graph case.
-            # If it's a graph capture for a batch of pure prompts (like in _dummy_run),
-            # num_decode_tokens should remain 0 (from self.num_decode_tokens initialized at line 233).
-            # Otherwise, for graphs involving decodes, batch_size is used.
-            if self.input_builder.inter_data_list and \
-               not all(inter_data.is_prompt
-                       for inter_data in self.input_builder.inter_data_list):
-                num_decode_tokens = batch_size
-            # If all are prompts (or inter_data_list is empty),
-            # num_decode_tokens (from line 233) is not changed by this block.
+            self.block_tables.extend([] * cuda_graph_pad_size)
+            num_decode_tokens = batch_size
 
             # The shape of graph_block_tables is
             # [max batch size, max context len // block size].

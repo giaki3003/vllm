@@ -2,7 +2,6 @@
 
 import gc
 import inspect
-import itertools
 import time
 import weakref
 from contextlib import contextmanager
@@ -554,7 +553,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TGpuInput], Generic[TGpuInput]):
                         "input_ids": input_tokens[:current_capture_batch_size], # Use renamed
                         "inputs_embeds": inputs_embeds[:current_capture_batch_size] if use_inputs_embeds else None, # Use renamed
                         "positions": input_positions[..., :current_capture_batch_size], # Use renamed
-                        "intermediate_tensors": intermediate_inputs[:current_capture_batch_size] if intermediate_inputs is not None else None, # Use renamed, key fixed
+                        "intermediate_inputs": intermediate_inputs[:current_capture_batch_size] if intermediate_inputs is not None else None, # Use renamed
                         "kv_caches": current_kv_caches,
                         "attn_metadata": attn_metadata,
                         "memory_pool": self.graph_memory_pool,
