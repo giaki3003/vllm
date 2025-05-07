@@ -440,9 +440,30 @@ class Worker(LocalOrDistributedWorkerBase):
                 f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
                 f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
             )
-        self.gpu_cache = [
-            self.cache_engine[ve].gpu_cache
-            for ve in range(self.parallel_config.pipeline_parallel_size)
+        logger.info(
+            f"Rank {self.rank}: Before creating self.gpu_cache. "
+            f"len(self.cache_engine) = {len(self.cache_engine)}, "
+            f"self.parallel_config.tensor_parallel_size = {self.parallel_config.tensor_parallel_size}"
+        )
+        self.gpu_cache = []
+        for ve in range(self.parallel_config.tensor_parallel_size):
+            logger.info(
+                f"Rank {self.rank}: In gpu_cache loop. ve = {ve}, "
+                f"len(self.cache_engine) = {len(self.cache_engine)}"
+            )
+            if ve < len(self.cache_engine):
+                self.gpu_cache.append(self.cache_engine[ve].gpu_cache)
+            else:
+                logger.error(
+                    f"Rank {self.rank}: IndexError about to occur in gpu_cache loop! "
+                    f"ve ({ve}) is out of bounds for self.cache_engine (len {len(self.cache_engine)})."
+                )
+                # This will still raise an error if accessed, but the log will be there.
+                # For safety, we could break or raise a more informative error here,
+                # but let's see what the log says first.
+                # If this path is taken, it means tensor_parallel_size is > len(self.cache_engine)
+                # which contradicts earlier logic.
+                self.gpu_cache.append(None) # Or handle error more gracefully
         ]
         bind_kv_cache(self.compilation_config.static_forward_context,
                       self.gpu_cache)

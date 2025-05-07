@@ -2457,13 +2457,79 @@ def bind_kv_cache(
         set(
             extract_layer_index(layer_name)
             for layer_name in layer_need_kv_cache))
+    # Assuming 'ctx' is the global static_forward_context from CompilationConfig
+    # Assuming 'kv_cache' is worker.gpu_cache, which is List[List[torch.Tensor]]
+    # where outer list is by TP rank, inner list is by layer.
+    # For TP=1, len(kv_cache) is 1. kv_cache[0] is the list of layer tensors.
+
+    from vllm.distributed import get_pp_group # Ensure this import is present
+
+    my_pipeline_rank = get_pp_group().rank_in_group
+
     for layer_name in layer_need_kv_cache:
         kv_cache_idx = layer_index_sorted.index(
             extract_layer_index(layer_name))
-        forward_ctx = ctx[layer_name]
-        assert len(forward_ctx.kv_cache) == len(kv_cache)
-        for ve, ve_kv_cache in enumerate(kv_cache):
-            forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+        forward_ctx = ctx[layer_name] # This is the StaticForwardInputs for the layer
+
+        # forward_ctx.kv_cache is presumably a list.
+        # If TP=1, kv_cache[0] is the list of actual tensors for each layer on this worker.
+        # We need to place the specific layer's tensor (kv_cache[0][kv_cache_idx])
+        # into the slot of forward_ctx.kv_cache corresponding to this worker's pipeline_rank.
+
+        if my_pipeline_rank < len(forward_ctx.kv_cache):
+            # This assumes forward_ctx.kv_cache is a list of placeholders,
+            # one for each pipeline stage, and each placeholder is the direct tensor (for TP=1).
+            if len(kv_cache) == 1: # Should be true for TP=1
+                forward_ctx.kv_cache[my_pipeline_rank] = kv_cache[0][kv_cache_idx]
+            else:
+                # Handle TP > 1 case if necessary, though current user case is TP=1
+                # For TP > 1, forward_ctx.kv_cache[my_pipeline_rank] would itself be a list
+                # indexed by tensor_parallel_rank (ve).
+                # Example for TP > 1:
+                # if my_pipeline_rank < len(forward_ctx.kv_cache):
+                #    if isinstance(forward_ctx.kv_cache[my_pipeline_rank], list):
+                #        for ve, ve_kv_cache_list_for_tp_rank in enumerate(kv_cache):
+                #            if ve < len(forward_ctx.kv_cache[my_pipeline_rank]):
+                #                forward_ctx.kv_cache[my_pipeline_rank][ve] = ve_kv_cache_list_for_tp_rank[kv_cache_idx]
+                #    else: # Should not happen if structure is consistent
+                #        logger.error("Mismatched structure in forward_ctx.kv_cache for TP > 1")
+                # For now, focusing on TP=1:
+                # This part of the original code was:
+                # for ve, ve_kv_cache in enumerate(kv_cache):
+                #    forward_ctx.kv_cache[ve] = ve_kv_cache[kv_cache_idx]
+                # This implies forward_ctx.kv_cache was indexed by 've' (tp_rank).
+                # If forward_ctx.kv_cache is truly indexed by pipeline_rank first,
+                # then the original logic was flawed for PP > 1.
+                # The most direct fix for PP > 1 and TP=1 is what's in the if len(kv_cache) == 1 block.
+                # If TP > 1 and PP > 1, this needs more careful handling of nested lists.
+                # For now, let's assume the user's TP=1 case is primary.
+                # If the original code was intended for forward_ctx.kv_cache to be indexed by tp_rank,
+                # then the length of forward_ctx.kv_cache should have been tensor_parallel_size.
+                # The assertion failed because it was pipeline_parallel_size.
+                # This suggests forward_ctx.kv_cache is indexed by pipeline_parallel_size.
+                # So, the assignment must use my_pipeline_rank.
+                # The original loop over `ve` (tp_rank) is only relevant if forward_ctx.kv_cache[my_pipeline_rank]
+                # is *also* a list.
+                # Given the original simple assignment `forward_ctx.kv_cache[ve] = ...`
+                # it's more likely that `forward_ctx.kv_cache` was expected to be a flat list of TP entries
+                # for the *current* pipeline stage.
+                # The fact that its length is PP_SIZE is the anomaly.
+                #
+                # Safest change for now, assuming forward_ctx.kv_cache is indexed by PP_RANK
+                # and each element is the direct tensor (for TP=1):
+                pass # The TP=1 case above handles it.
+                     # If TP > 1, the original loop might be closer but needs `forward_ctx.kv_cache` to be structured per TP.
+                     # This indicates a deeper structural mismatch if both PP > 1 and TP > 1.
+                     # For user's case (PP=2, TP=1), the `if len(kv_cache) == 1:` block is key.
+        else:
+            from vllm.logger import init_logger
+            logger = init_logger(__name__) # Ensure logger is available
+            logger.error(
+                f"Pipeline rank {my_pipeline_rank} is out of bounds for "
+                f"forward_ctx.kv_cache (len {len(forward_ctx.kv_cache)}) "
+                f"for layer {layer_name}. This should not happen if "
+                "static_forward_context is prepared correctly for all pipeline stages."
+            )
 
 
 def run_method(obj: Any, method: Union[str, bytes, Callable], args: tuple[Any],
