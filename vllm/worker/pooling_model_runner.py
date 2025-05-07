@@ -14,9 +14,8 @@ from vllm.multimodal import MultiModalKwargs
 from vllm.pooling_params import PoolingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput, SequenceData,
                            SequenceGroupMetadata)
-from vllm.worker.gpu_runner_base import GPUModelRunnerBase
-from vllm.worker.gpu_input_types import ModelInputForGPU
-from vllm.worker.gpu_input_builder import ModelInputForGPUBuilder
+from vllm.worker.model_runner import (GPUModelRunnerBase, ModelInputForGPU,
+                                      ModelInputForGPUBuilder)
 
 logger = init_logger(__name__)
 

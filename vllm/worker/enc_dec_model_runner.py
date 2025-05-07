@@ -26,9 +26,9 @@ from vllm.sampling_params import SamplingParams
 from vllm.sequence import (IntermediateTensors, PoolerOutput,
                            SequenceGroupMetadata)
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_BACKEND, make_tensor_with_pad
-from vllm.worker.gpu_runner_base import GPUModelRunnerBase
-from vllm.worker.gpu_input_builder import ModelInputForGPUBuilder
-from vllm.worker.gpu_input_types import ModelInputForGPUWithSamplingMetadata
+from vllm.worker.model_runner import (GPUModelRunnerBase,
+                                      ModelInputForGPUBuilder,
+                                      ModelInputForGPUWithSamplingMetadata)
 from vllm.worker.model_runner_base import (
     _add_attn_metadata_broadcastable_dict,
     _add_sampling_metadata_broadcastable_dict)
