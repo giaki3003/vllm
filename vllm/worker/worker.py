@@ -11,6 +11,7 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.device_allocator.cumem import CuMemAllocator
 from vllm.distributed import (ensure_model_parallel_initialized,
+                              get_pp_group,
                               init_distributed_environment,
                               set_custom_all_reduce)
 from vllm.distributed.kv_transfer import ensure_kv_transfer_initialized
@@ -251,10 +252,22 @@ class Worker(LocalOrDistributedWorkerBase):
         logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: Before memory_profiling context.")
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: determine_num_available_blocks_before_profile_run | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
         with memory_profiling(
                 self.baseline_snapshot,
                 weights_memory=self.model_runner.model_memory_usage) as result:
             self.model_runner.profile_run()
+
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: determine_num_available_blocks_after_profile_run | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
+
 
         logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: After memory_profiling context. Result weights memory: {result.weights_memory}, peak: {result.torch_peak_increase}")
 
@@ -269,11 +282,28 @@ class Worker(LocalOrDistributedWorkerBase):
         # profiled peak memory.
         cache_block_size = self.get_cache_block_size_bytes()
         logger.error(f"[WORKER_PROFILE_DEBUG] Worker rank {self.rank}: available_kv_cache_memory = {available_kv_cache_memory} ({available_kv_cache_memory / (1024**3):.2f} GiB), cache_block_size = {cache_block_size} ({cache_block_size / (1024**2):.2f} MiB)")
+        
+        # Determine how many CacheEngine instances this worker will create.
+        # This should be based on tensor_parallel_size, as each TP rank might need its own cache.
+        # Pipeline parallelism is handled by having separate worker processes.
+        num_cache_instances_this_worker = self.parallel_config.tensor_parallel_size
+        if num_cache_instances_this_worker <= 0: # Safeguard, should be at least 1
+            logger.warning(f"Rank {self.rank}: self.parallel_config.tensor_parallel_size is {num_cache_instances_this_worker}, defaulting to 1 for cache instance count.")
+            num_cache_instances_this_worker = 1
+        
+        logger.info(f"Rank {self.rank}: Worker will create {num_cache_instances_this_worker} CacheEngine instance(s) (based on tensor_parallel_size).")
+
         if cache_block_size == 0:
             num_gpu_blocks = 0
             num_cpu_blocks = 0
         else:
-            num_gpu_blocks = int(available_kv_cache_memory // cache_block_size)
+            # Divide the available KV cache memory by the number of CacheEngine
+            # instances this worker will create.
+            effective_available_kv_cache_memory_per_instance = available_kv_cache_memory / num_cache_instances_this_worker
+            num_gpu_blocks = int(effective_available_kv_cache_memory_per_instance // cache_block_size)
+            # CPU blocks are typically for swapping and might not need this division,
+            # but if they were also per-CacheEngine, similar logic would apply.
+            # For now, assume CPU swap space is shared or globally managed.
             num_cpu_blocks = int(self.cache_config.swap_space_bytes //
                                  cache_block_size)
         num_gpu_blocks = max(num_gpu_blocks, 0)
@@ -299,6 +329,12 @@ class Worker(LocalOrDistributedWorkerBase):
         # Final cleanup
         gc.collect()
 
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: determine_num_available_blocks_end | "
+            f"Calculated available_kv_cache_memory: {available_kv_cache_memory / (1024**3):.2f} GiB, num_gpu_blocks: {num_gpu_blocks} | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
         return num_gpu_blocks, num_cpu_blocks
 
     def _assert_memory_footprint_increased_during_profiling(self):
@@ -319,6 +355,11 @@ class Worker(LocalOrDistributedWorkerBase):
 
         This also warms up the model, which may record CUDA graphs.
         """
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: initialize_cache_start | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
 # Determine the rank of this worker to pick its specific block counts.
         # self.rank is the global rank.
         # If pipeline parallelism is used, workers are typically indexed 0 to PP_SIZE-1
@@ -343,17 +384,62 @@ class Worker(LocalOrDistributedWorkerBase):
         else:
             from contextlib import nullcontext
             context = nullcontext()
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: initialize_cache_before_init_cache_engine_context | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
         with context:
             self._init_cache_engine()
         self._warm_up_model()
 
     def _init_cache_engine(self):
         assert self.cache_config.num_gpu_blocks is not None
-        self.cache_engine = [
-            CacheEngine(self.cache_config, self.model_config,
-                        self.parallel_config, self.device_config)
-            for _ in range(self.parallel_config.pipeline_parallel_size)
-        ]
+        logger.info(
+            f"[MEM_TRACE] Rank {self.rank} - Stage: _init_cache_engine_before_cache_engine_ctor | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
+        # Determine the number of layers for this worker's pipeline stage
+        # using the VRAM-balanced counts.
+        my_pipeline_rank = get_pp_group().rank_in_group
+        if (hasattr(self.parallel_config, '_current_pipeline_stage_counts')
+                and self.parallel_config._current_pipeline_stage_counts):
+            num_layers_for_this_stage = self.parallel_config._current_pipeline_stage_counts[my_pipeline_rank]
+        else:
+            # Fallback if VRAM-balanced counts are not available (should not happen if init was correct)
+            logger.warning("VRAM-balanced pipeline stage counts not found or empty. "
+                           "Falling back to potentially incorrect layer count for CacheEngine.")
+            num_model_layers = self.model_config.get_num_layers(self.parallel_config)
+            num_layers_for_this_stage = num_model_layers // self.parallel_config.pipeline_parallel_size
+            # Add any remainder to the first few stages (simplified)
+            if my_pipeline_rank < (num_model_layers % self.parallel_config.pipeline_parallel_size):
+                num_layers_for_this_stage +=1
+
+        logger.info(
+            f"Rank {self.rank} (Pipeline Stage {my_pipeline_rank}): Initializing CacheEngine with {num_layers_for_this_stage} layers."
+        )
+
+        logger.info(
+            f"Rank {self.rank}: In _init_cache_engine, self.parallel_config.pipeline_parallel_size = {self.parallel_config.pipeline_parallel_size}"
+        )
+        self.cache_engine = []
+        for i in range(self.parallel_config.tensor_parallel_size):
+            logger.info(
+                f"Rank {self.rank}: Initializing CacheEngine instance {i+1}/{self.parallel_config.tensor_parallel_size} (based on tensor_parallel_size)..."
+            )
+            engine_instance = CacheEngine(
+                self.cache_config, self.model_config,
+                self.parallel_config, self.device_config,
+                num_layers_this_stage=num_layers_for_this_stage
+            )
+            self.cache_engine.append(engine_instance)
+            torch.cuda.synchronize() # Ensure all ops for this engine are done
+            logger.info(
+                f"Rank {self.rank}: After CacheEngine instance {i+1} initialized | "
+                f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+                f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+            )
         self.gpu_cache = [
             self.cache_engine[ve].gpu_cache
             for ve in range(self.parallel_config.pipeline_parallel_size)

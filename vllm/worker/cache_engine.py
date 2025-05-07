@@ -27,6 +27,7 @@ class CacheEngine:
         model_config: ModelConfig,
         parallel_config: ParallelConfig,
         device_config: DeviceConfig,
+        num_layers_this_stage: int,
     ) -> None:
         self.cache_config = cache_config
         self.model_config = model_config
@@ -34,9 +35,8 @@ class CacheEngine:
         self.device_config = device_config
 
         self.head_size = model_config.get_head_size()
-        # Models like Jamba, have mixed typed layers, E.g Mamba
-        self.num_attention_layers = model_config.get_num_layers_by_block_type(
-            parallel_config, LayerBlockType.attention)
+        # Use the number of layers specific to this pipeline stage
+        self.num_attention_layers = num_layers_this_stage
         self.num_kv_heads = model_config.get_num_kv_heads(parallel_config)
 
         self.block_size = cache_config.block_size
@@ -49,12 +49,22 @@ class CacheEngine:
             self.dtype = STR_DTYPE_TO_TORCH_DTYPE[cache_config.cache_dtype]
 
         # Get attention backend.
+        logger.info(
+            f"[MEM_TRACE_CACHE_ENGINE] Before get_attn_backend | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
         self.attn_backend = get_attn_backend(self.head_size,
                                              model_config.dtype,
                                              cache_config.cache_dtype,
                                              self.block_size,
                                              model_config.is_attention_free,
                                              use_mla=model_config.use_mla)
+        logger.info(
+            f"[MEM_TRACE_CACHE_ENGINE] After get_attn_backend | "
+            f"Alloc: {torch.cuda.memory_allocated() / (1024**3):.2f} GiB, Res: {torch.cuda.memory_reserved() / (1024**3):.2f} GiB | "
+            f"Free: {torch.cuda.mem_get_info()[0] / (1024**3):.2f} GiB, Total: {torch.cuda.mem_get_info()[1] / (1024**3):.2f} GiB"
+        )
 
         # Initialize the cache.
         self.gpu_cache = self._allocate_kv_cache(
