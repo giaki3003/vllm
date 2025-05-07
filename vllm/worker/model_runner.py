@@ -1090,7 +1090,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.parallel_config.pipeline_parallel_size > 1:
             try:
                 # Attempt to get rank only if group might be initialized
-                if torch.distributed.is_initialized() and get_pp_group(False) is not None: # False to not assert
+                if torch.distributed.is_initialized() and get_pp_group() is not None: # False to not assert
                     pp_rank_for_log = get_pp_group().rank_in_group
                 else:
                     pp_rank_for_log = 'N/A_NO_GROUP'
@@ -1120,7 +1120,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         if self.parallel_config.pipeline_parallel_size > 1:
             try:
                 # Attempt to get rank only if group might be initialized
-                if torch.distributed.is_initialized() and get_pp_group(False) is not None: # False to not assert
+                if torch.distributed.is_initialized() and get_pp_group() is not None: # False to not assert
                     pp_rank_for_log = get_pp_group().rank_in_group
                 else:
                     pp_rank_for_log = 'N/A_NO_GROUP'
@@ -1197,7 +1197,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ve1_id_log = id(self.graph_runners[1]) if hasattr(self, 'graph_runners') and self.graph_runners is not None and gr_len > 1 and self.graph_runners[1] is not None else 'N/A'
         pp_rank_log = 'N/A_EARLY'
         if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized():
-            pp_group_val = get_pp_group(False)
+            pp_group_val = get_pp_group()
             if pp_group_val is not None:
                 pp_rank_log = pp_group_val.rank_in_group
         elif self.parallel_config.pipeline_parallel_size <= 1:
@@ -1548,7 +1548,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ve1_id_log_capture = id(self.graph_runners[1]) if self.graph_runners is not None and gr_len_capture > 1 and self.graph_runners[1] is not None else 'N/A'
         pp_rank_log_capture = 'N/A_CAPTURE_ENTRY'
         if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized():
-            pp_group_val_capture = get_pp_group(False)
+            pp_group_val_capture = get_pp_group()
             if pp_group_val_capture is not None:
                 pp_rank_log_capture = pp_group_val_capture.rank_in_group
         elif self.parallel_config.pipeline_parallel_size <=1:
@@ -1648,7 +1648,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
             for virtual_engine in stages_to_capture:
                 # Corrected rank_in_group and added more ID details
                 ve_dict_id_proc = id(self.graph_runners[virtual_engine]) if virtual_engine < len(self.graph_runners) and self.graph_runners[virtual_engine] is not None else 'N/A'
-                pp_rank_log_ve_proc = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group(False) is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_VE_PROC')
+                pp_rank_log_ve_proc = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group() is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_VE_PROC')
                 print(f"[DEBUG CAPTURE_MODEL] VE {virtual_engine} (PP Rank {pp_rank_log_ve_proc}): Processing. Dict ID for this VE: {ve_dict_id_proc}. Current keys: {list(self.graph_runners[virtual_engine].keys()) if virtual_engine < len(self.graph_runners) and self.graph_runners[virtual_engine] is not None else 'N/A or new'}")
                 # We need to not only iterate over batch sizes, but also whether
                 # to use inputs_embeds or not, hence we use the cartesian
@@ -1764,7 +1764,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
                     self.graph_runners[virtual_engine][(
                         batch_size, use_inputs_embeds)] = graph_runner
                     # Corrected rank_in_group
-                    pp_rank_log_assign = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group(False) is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_ASSIGN')
+                    pp_rank_log_assign = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group() is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_ASSIGN')
                     print(f"[DEBUG CAPTURE_ASSIGN] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {pp_rank_log_assign}, VE {virtual_engine}: Assigned graph for key ({batch_size}, {use_inputs_embeds}). Dict ID for this VE: {id(self.graph_runners[virtual_engine])}. Current VE keys: {list(self.graph_runners[virtual_engine].keys())}")
 
         if self.lora_config:
@@ -1783,7 +1783,7 @@ class GPUModelRunnerBase(ModelRunnerBase[TModelInputForGPU]):
         ve0_keys_log_exit = list(self.graph_runners[0].keys()) if gr_len_exit > 0 and self.graph_runners[0] is not None else 'VE 0 empty/None/N/A'
         ve1_id_log_exit = id(self.graph_runners[1]) if gr_len_exit > 1 and self.graph_runners[1] is not None else 'N/A'
         ve1_keys_log_exit = list(self.graph_runners[1].keys()) if gr_len_exit > 1 and self.graph_runners[1] is not None else 'VE 1 empty/None/N/A'
-        pp_rank_log_exit = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group(False) is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_EXIT_CAPTURE')
+        pp_rank_log_exit = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group() is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_EXIT_CAPTURE')
         print(f"[DEBUG LIFECYCLE] Worker rank {get_tensor_model_parallel_rank()}, PP Rank {pp_rank_log_exit}: EXITING capture_model. ID of self.graph_runners: {id(self.graph_runners)}, VE0 ID: {ve0_id_log_exit}, Keys VE0: {ve0_keys_log_exit}, VE1 ID: {ve1_id_log_exit}, Keys VE1: {ve1_keys_log_exit}")
 
     def _update_inputs_to_capture_for_enc_dec_model(self,
@@ -1910,7 +1910,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             # This print was already added in a previous step, ensuring it's correctly placed / not duplicated.
             # Corrected rank_in_group and added more ID details
             ve_dict_id_exec = id(self.graph_runners[virtual_engine]) if virtual_engine < len(self.graph_runners) and self.graph_runners[virtual_engine] is not None else 'N/A'
-            pp_rank_log_exec = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group(False) is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_EXEC')
+            pp_rank_log_exec = get_pp_group().rank_in_group if self.parallel_config.pipeline_parallel_size > 1 and torch.distributed.is_initialized() and get_pp_group() is not None else (0 if self.parallel_config.pipeline_parallel_size <=1 else 'N/A_EXEC')
             print(f"[DEBUG LIFECYCLE] In execute_model, Worker rank {get_tensor_model_parallel_rank()}, PP Rank {pp_rank_log_exec}. ID of self: {id(self)}, ID of self.graph_runners: {id(self.graph_runners)}, ID of self.graph_runners[{virtual_engine}]: {ve_dict_id_exec}")
             graph_lookup_key = (graph_batch_size, use_inputs_embeds)
             print(f"[DEBUG EXECUTE] In execute_model, virtual_engine: {virtual_engine}") # This was already present
