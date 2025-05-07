@@ -4,7 +4,7 @@ Worker-related helper functions.
 '''
 
 from vllm.utils import STR_NOT_IMPL_ENC_DEC_ERR_STRS
-from vllm.worker.model_runner import GPUModelRunnerBase
+from vllm.worker.gpu_runner_base import GPUModelRunnerBase
 
 
 def assert_enc_dec_mr_supported_scenario(

@@ -31,7 +31,8 @@ from vllm.model_executor.models.utils import PPMissingLayer
 from vllm.attention.backends.abstract import AttentionType # Corrected import
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
-from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
+from vllm.worker.gpu_runner_base import GPUModelRunnerBase
+from vllm.worker.model_runner import ModelRunner
 from vllm.worker.pooling_model_runner import PoolingModelRunner
 from vllm.worker.worker_base import (LocalOrDistributedWorkerBase, WorkerBase,
                                      WorkerInput)

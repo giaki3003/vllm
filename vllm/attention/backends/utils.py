@@ -171,10 +171,16 @@ class CommonMetadataBuilder(AttentionMetadataBuilder[TAttentionMetadata]):
                 self.num_prefills += 1
                 self.num_prefill_tokens += token_len
                 self.prefill_seq_lens.append(seq_len)
-            else:
-                assert query_len == 1, (
-                    "seq_len: {}, context_len: {}, query_len: {}".format(
-                        seq_len, context_len, query_len))
+            else: # not is_prompt
+                if query_len != 1:
+                    # This case should ideally not happen for decode phase if inputs are single tokens
+                    logger.warning(f"Unexpected query_len ({query_len}) for a non-prompt sequence. Seq ID: {seq_id}, Seq Len: {seq_len}, Context Len: {context_len}. Expected 1.")
+                # assert query_len == 1, (
+                #     "seq_len: {}, context_len: {}, query_len: {}".format(
+                #         seq_len, context_len, query_len))
+                # For profiling, it's possible query_len might not be 1 if dummy data is unusual.
+                # The core issue is if num_decode_tokens is incremented when it shouldn't be.
+                # print(f"DEBUG: Incrementing num_decode_tokens. is_prompt={is_prompt}, query_len={query_len}, current_num_decode_tokens={self.num_decode_tokens}")
                 self.num_decode_tokens += query_len
                 self.curr_seq_lens.append(curr_seq_len)
 

@@ -18,8 +18,8 @@ from vllm.platforms import current_platform
 from vllm.sequence import (CompletionSequenceGroupOutput, IntermediateTensors,
                            Logprob, SequenceGroupMetadata, SequenceOutput)
 from vllm.utils import PyObjectCache, async_tensor_h2d, current_stream
-from vllm.worker.model_runner import (GPUModelRunnerBase,
-                                      ModelInputForGPUWithSamplingMetadata)
+from vllm.worker.gpu_runner_base import GPUModelRunnerBase
+from vllm.worker.gpu_input_types import ModelInputForGPUWithSamplingMetadata
 from vllm.worker.model_runner_base import (
     BroadcastableModelInput, _init_attn_metadata_from_tensor_dict,
     _init_frozen_model_input_from_tensor_dict,
