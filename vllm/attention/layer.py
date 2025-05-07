@@ -133,7 +133,6 @@ class Attention(nn.Module):
         impl_cls = attn_backend.get_impl_cls()
         self.impl = impl_cls(num_heads, head_size, scale, num_kv_heads,
                              alibi_slopes, sliding_window, kv_cache_dtype,
-                             block_size, # Pass block_size
                              blocksparse_params, logits_soft_cap, attn_type,
                              **extra_impl_args)
         self.backend = backend_name_to_enum(attn_backend.get_name())
