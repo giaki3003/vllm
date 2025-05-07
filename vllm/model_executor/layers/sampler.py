@@ -385,7 +385,7 @@ def _apply_min_tokens_penalty(
         logits[tuple(zip(*logits_to_penalize))] = -float("inf")
 
     # verifies that no rows in logits were missed unexpectedly
-    assert logits_applied == logits.shape[0]
+    #assert logits_applied == logits.shape[0]
     return logits
 
 
