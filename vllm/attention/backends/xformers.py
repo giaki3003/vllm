@@ -505,11 +505,34 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         else:
             assert value is None
 
+        # Initialize local cache variables
+        local_key_cache: Optional[torch.Tensor] = None
+        local_value_cache: Optional[torch.Tensor] = None
+        
+        from vllm.logger import init_logger
+        logger = init_logger(__name__)
+
+        logger.info(
+            f"XFormersBackend.forward: attn_type={attn_type}, "
+            f"input kv_cache type={type(kv_cache)}, "
+            f"input kv_cache shape={kv_cache.shape if isinstance(kv_cache, torch.Tensor) else 'N/A'}, "
+            f"input kv_cache numel={kv_cache.numel() if isinstance(kv_cache, torch.Tensor) else 'N/A'}"
+        )
+        if attn_metadata:
+            logger.info(
+                f"XFormersBackend.forward: attn_metadata present. "
+                f"num_prefill_tokens={attn_metadata.num_prefill_tokens}, "
+                f"num_decode_tokens={attn_metadata.num_decode_tokens}, "
+                f"slot_mapping_shape={attn_metadata.slot_mapping.shape if attn_metadata.slot_mapping is not None else 'N/A'}"
+            )
+
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
 
-        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
+        # Restore original condition, as kv_cache is a tensor here
+        if (attn_type != AttentionType.ENCODER and isinstance(kv_cache, torch.Tensor) and kv_cache.numel() > 0):
+            logger.info(f"XFormersBackend.forward: Condition for PagedAttention.split_kv_cache is TRUE.")
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -517,11 +540,16 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
+            local_key_cache, local_value_cache = PagedAttention.split_kv_cache(
                 kv_cache, self.num_kv_heads, self.head_size)
+            logger.info(
+                f"XFormersBackend.forward: After split_kv_cache: "
+                f"local_key_cache shape={local_key_cache.shape if local_key_cache is not None else 'None'}, "
+                f"local_value_cache shape={local_value_cache.shape if local_value_cache is not None else 'None'}"
+            )
 
             if (key is not None) and (value is not None):
-
+                logger.info(f"XFormersBackend.forward: Writing to paged cache.")
                 if attn_type == AttentionType.ENCODER_DECODER:
                     # Update cross-attention KV cache (prefill-only)
                     # During cross-attention decode, key & value will be None,
@@ -536,7 +564,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 # not cached. This happens during the initial memory
                 # profiling run.
                 PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping,
+                    key, value, local_key_cache, local_value_cache, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
@@ -580,8 +608,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     key,
                     value,
                     self.kv_cache_dtype,
-                    key_cache,
-                    value_cache,
+                    local_key_cache, # Use local_key_cache
+                    local_value_cache, # Use local_value_cache
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
@@ -603,11 +631,24 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 max_seq_len_arg,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+            
+            logger.info(
+                f"XFormersBackend.forward: Before PagedAttention.forward_decode: "
+                f"decode_query_shape={decode_query.shape if decode_query is not None else 'None'}, "
+                f"local_key_cache is {'None' if local_key_cache is None else 'Exists'}, "
+                f"local_value_cache is {'None' if local_value_cache is None else 'Exists'}"
+            )
+            if local_key_cache is None or local_value_cache is None:
+                logger.error(
+                    "XFormersBackend.forward: local_key_cache or local_value_cache is None before forward_decode!"
+                )
+                # Potentially raise an error here or ensure PagedAttention.forward_decode can handle None
+                # This path indicates the if condition at line 512 was false.
 
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
-                key_cache,
-                value_cache,
+                local_key_cache, # Use local_key_cache
+                local_value_cache, # Use local_value_cache
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
