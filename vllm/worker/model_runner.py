@@ -273,7 +273,7 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             assert isinstance(hidden_or_intermediate_states, torch.Tensor), \
                 f"Expected hidden_states to be a Tensor for sampling, got {type(hidden_or_intermediate_states)}"
             output: SamplerOutput = self.sampler(
-                embedding=hidden_or_intermediate_states,
+                logits=hidden_or_intermediate_states,
                 sampling_metadata=model_input.sampling_metadata,
             )
             return [output]
