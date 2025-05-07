@@ -24,11 +24,8 @@ from vllm.platforms import current_platform
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sequence import (ExecuteModelRequest, IntermediateTensors,
                            SequenceGroupMetadata, SequenceGroupMetadataDelta)
-from vllm.utils import (GiB_bytes, MemorySnapshot,
-                        bind_single_layer_kv_cache, # Changed import
+from vllm.utils import (GiB_bytes, MemorySnapshot, bind_kv_cache,
                         memory_profiling)
-from vllm.model_executor.models.utils import PPMissingLayer
-from vllm.attention.backends.abstract import AttentionType # Corrected import
 from vllm.worker.cache_engine import CacheEngine
 from vllm.worker.enc_dec_model_runner import EncoderDecoderModelRunner
 from vllm.worker.model_runner import GPUModelRunnerBase, ModelRunner
@@ -411,49 +408,11 @@ class Worker(LocalOrDistributedWorkerBase):
                            f"self.gpu_cache will contain all Nones.")
 
         # KV cache binding logic:
-        # Operates on the actual tensors from single_engine_gpu_cache.
-        static_forward_root_ctx = self.compilation_config.static_forward_context
-        assert self.pipeline_stage_rank is not None, \
-            f"Worker rank {self.rank}: pipeline_stage_rank is None in _init_cache_engine for binding."
-        pp_rank = self.pipeline_stage_rank
-        pp_size = self.parallel_config.pipeline_parallel_size
-        
-        local_layer_idx = 0
-        # Use single_engine_gpu_cache for binding, as it's the actual List[Tensor] for this stage
-        if single_engine_gpu_cache is not None and hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
-            for global_name, module in self.model_runner.model.named_modules():
-                is_cacheable_layer = hasattr(module, 'attn_type') and \
-                                     module.attn_type in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)
-                
-                if is_cacheable_layer and not isinstance(module, PPMissingLayer):
-                    if global_name in static_forward_root_ctx:
-                        layer_static_ctx = static_forward_root_ctx[global_name]
-                        if local_layer_idx < len(single_engine_gpu_cache):
-                            cache_tensor_for_this_layer = single_engine_gpu_cache[local_layer_idx]
-                            bind_single_layer_kv_cache(
-                                layer_static_ctx,
-                                cache_tensor_for_this_layer,
-                                pp_rank,
-                                pp_size
-                            )
-                            local_layer_idx += 1
-                        else:
-                            logger.error(f"Worker rank {self.rank} (PP stage {pp_rank}): "
-                                           f"Mismatch between iterable model layers and single_engine_gpu_cache size. "
-                                           f"Attempted to access single_engine_gpu_cache index {local_layer_idx} "
-                                           f"for layer {global_name}, but cache size is {len(single_engine_gpu_cache)}.")
-                            break
-                    # else:
-                        # logger.debug(f"Worker rank {self.rank} (PP stage {pp_rank}): "
-                        #             f"Layer {global_name} not found in static_forward_context.")
-            
-            if single_engine_gpu_cache and local_layer_idx != len(single_engine_gpu_cache):
-                 pass # logger.warning or debug if not all tensors in single_engine_gpu_cache were bound.
-                 
-        elif single_engine_gpu_cache is None:
-            logger.warning(f"Worker rank {self.rank} (PP stage {pp_rank}): single_engine_gpu_cache is None, skipping kv_cache binding.")
-        else:
-            logger.warning(f"Worker rank {self.rank} (PP stage {pp_rank}): model_runner.model not available, skipping kv_cache binding.")
+        # The new bind_kv_cache function expects the worker's gpu_cache,
+        # which is List[Optional[List[torch.Tensor]]], where the inner List[torch.Tensor]
+        # (or None) corresponds to the cache tensors for a specific pipeline stage.
+        bind_kv_cache(self.compilation_config.static_forward_context,
+                      self.gpu_cache)
 
     def _warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
