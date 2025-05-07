@@ -120,9 +120,11 @@ class CUDAGraphRunner(nn.Module):
         }
         
         output_hidden_or_intermediate_states = self.model(
-            **model_inputs_for_warmup,
-            kv_caches=kv_caches,
-            attn_metadata=attn_metadata,
+            **model_inputs_for_warmup
+            # kv_caches and attn_metadata are not direct arguments to the model's
+            # top-level forward method. They are used by the Attention layers
+            # internally, accessed via attn_metadata (from ForwardContext) and
+            # the CacheEngine.
         )
 
         if isinstance(output_hidden_or_intermediate_states,
@@ -151,9 +153,8 @@ class CUDAGraphRunner(nn.Module):
             graph_run_inputs = {name: self.input_buffers[name] for name in self.static_input_names}
             
             current_output = self.model(
-                **graph_run_inputs,
-                kv_caches=kv_caches, 
-                attn_metadata=attn_metadata, 
+                **graph_run_inputs
+                # kv_caches and attn_metadata are not direct arguments here either.
             )
             if isinstance(current_output, IntermediateTensors):
                 if isinstance(current_output.tensors, torch.Tensor) and "intermediate_tensors_output" in self.output_buffers:
