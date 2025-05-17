@@ -26,7 +26,6 @@ from typing import Iterable, Optional, Set, Tuple, Union
 import torch
 from torch import nn
 from transformers import Qwen3Config
-import os
 
 from vllm.attention import Attention, AttentionType
 from vllm.compilation.decorators import support_torch_compile
@@ -156,42 +155,21 @@ class Qwen3DecoderLayer(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        
-        # ======= QWEN3_DECODER_LAYER_INIT DEBUG START =======
-        current_pid_ql = os.getpid()
-        # We need a way to know if this layer instance is on worker 1.
-        # This might require passing worker_rank or pipeline_stage_rank into this __init__
-        # from where Qwen3Model creates its layers, if possible.
-        # For now, just logging pid.
-        log_prefix_ql = f"[QWEN3_LAYER_INIT pid={current_pid_ql} prefix='{prefix}']"
-
-        logger.error(
-            f"{log_prefix_ql} Initializing. "
-            f"Hidden_size: {config.hidden_size}, Num_heads: {config.num_attention_heads}, "
-            f"Num_kv_heads: {config.num_key_value_heads}. "
-            f"cache_config is None: {cache_config is None}."
-        )
-        if cache_config:
-            logger.error(
-                f"{log_prefix_ql}   cache_config.cache_dtype: {cache_config.cache_dtype}, "
-                f"block_size: {cache_config.block_size}, "
-                f"num_gpu_blocks: {cache_config.num_gpu_blocks}, " # Is this global or per-worker here?
-                f"num_cpu_blocks: {cache_config.num_cpu_blocks}"
-            )
-        # ======= QWEN3_DECODER_LAYER_INIT DEBUG END =======
-
         self.hidden_size = config.hidden_size
+        # Requires transformers > 4.32.0
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
 
+        # By default, Qwen3 uses causal attention as it is a decoder-only model.
+        # You can override the HF config with `is_causal=False` to enable
+        # bidirectional attention, which is used in some embedding models
+        # (e.g. Alibaba-NLP/gte-Qwen3-7B-instruct)
         if getattr(config, "is_causal", True):
             attn_type = AttentionType.DECODER
         else:
             attn_type = AttentionType.ENCODER_ONLY
-        
-        logger.error(f"{log_prefix_ql} Determined attn_type: {attn_type}")
 
-        self.self_attn = Qwen3Attention( # This is vllm.model_executor.models.qwen3.Qwen3Attention
+        self.self_attn = Qwen3Attention(
             hidden_size=self.hidden_size,
             num_heads=config.num_attention_heads,
             max_position=config.max_position_embeddings,
@@ -200,12 +178,23 @@ class Qwen3DecoderLayer(nn.Module):
             rms_norm_eps=config.rms_norm_eps,
             qkv_bias=getattr(config, 'attention_bias', False),
             head_dim=getattr(config, 'head_dim', None),
-            cache_config=cache_config, # Passed to Qwen3Attention
+            cache_config=cache_config,
             quant_config=quant_config,
             rope_scaling=rope_scaling,
-            prefix=f"{prefix}.self_attn", # This prefix is important for layer_name
+            prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
+        self.mlp = Qwen3MLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
+        self.input_layernorm = RMSNorm(config.hidden_size,
+                                       eps=config.rms_norm_eps)
+        self.post_attention_layernorm = RMSNorm(config.hidden_size,
+                                                eps=config.rms_norm_eps)
 
     def forward(
         self,
