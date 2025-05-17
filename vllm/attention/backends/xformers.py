@@ -483,139 +483,117 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-    # ======= TEMPORARY DEBUG LOGS START =======
-        try:
-            effective_attn_type = self.attn_type
-            logger.error(f"[XFORMERS_FORWARD_DEBUG] self.attn_type: {effective_attn_type}, "
-                         f"kv_cache.numel(): {kv_cache.numel() if kv_cache is not None else 'None'}, "
-                         f"is_prefill: {attn_metadata.num_prefills > 0}, "
-                         f"num_prefill_tokens: {attn_metadata.num_prefill_tokens}, "
-                         f"block_tables.numel(): {attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else 'None'}")
-        except Exception as e:
-            logger.error(f"[XFORMERS_FORWARD_DEBUG] Error in debug log: {e}")
-        # ======= TEMPORARY DEBUG LOGS END =======
-        attn_type = self.attn_type
-        # Check that appropriate attention metadata attributes are
-        # selected for the desired attention type
-        if (attn_type == AttentionType.ENCODER
-                and (not attn_metadata.is_all_encoder_attn_metadata_set)):
-            raise AttributeError("Encoder attention requires setting "
-                                 "encoder metadata attributes.")
+        # ======= Universal Entry Log for each call to forward() =======
+        # This replaces your previous log at line 489 to provide more context
+        # and ensure it always runs at the very start.
+        _is_prefill = attn_metadata.num_prefills > 0
+        _block_tables_numel = attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else -1 # Use -1 if None
+        _kv_cache_numel = kv_cache.numel() if kv_cache is not None else -1
 
-        elif (attn_type == AttentionType.ENCODER_DECODER
-              and (not attn_metadata.is_all_cross_attn_metadata_set)):
-            raise AttributeError("Encoder/decoder cross-attention "
-                                 "requires setting cross-attention "
-                                 "metadata attributes.")
+        logger.error(
+            f"[XF_FWD_ENTRY] worker_pid_INDICATOR={os.getpid()}, attn_type: {attn_type}, " # Added PID
+            f"kv_cache.numel: {_kv_cache_numel}, kv_cache_shape: {kv_cache.shape if kv_cache is not None and hasattr(kv_cache, 'shape') else 'N/A'}, "
+            f"is_prefill: {_is_prefill}, "
+            f"num_prefill_tok: {attn_metadata.num_prefill_tokens}, "
+            f"block_tables.numel: {_block_tables_numel}"
+        )
+        # ======= End Universal Entry Log =======
 
-        query = query.view(-1, self.num_heads, self.head_size)
-        if key is not None:
-            assert value is not None
-            key = key.view(-1, self.num_kv_heads, self.head_size)
-            value = value.view(-1, self.num_kv_heads, self.head_size)
-        else:
-            assert value is None
+        # Tentative definition site for key_cache and value_cache
+        # We will explicitly track if they are defined
+        key_cache_defined_in_scope = False 
 
-        # Self-attention vs. cross-attention will impact
-        # which KV cache memory-mapping & which
-        # seqlen datastructures we utilize
+        if (attn_type != AttentionType.ENCODER and kv_cache is not None and kv_cache.numel() > 0):
+            logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] Trying to split kv_cache. Shape: {kv_cache.shape}")
+            try:
+                # Define key_cache and value_cache here
+                key_cache_local, value_cache_local = PagedAttention.split_kv_cache(
+                    kv_cache, self.num_kv_heads, self.head_size)
+                
+                # Assign to scope variables that are checked later
+                key_cache = key_cache_local
+                value_cache = value_cache_local
+                key_cache_defined_in_scope = True
+                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] split_kv_cache SUCCESS. key_cache defined: True. Shape: {key_cache.shape}")
+            except Exception as e_split:
+                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] PagedAttention.split_kv_cache FAILED: {e_split}", exc_info=True)
+                # If split fails, key_cache remains undefined or error propagates
+                # Forcing a clear state:
+                key_cache_defined_in_scope = False 
+                # Depending on the error, execution might stop here or key_cache might be truly unbound
 
-        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
-            # KV-cache during decoder-self- or
-            # encoder-decoder-cross-attention, but not
-            # during encoder attention.
-            #
-            # Even if there are no new key/value pairs to cache,
-            # we still need to break out key_cache and value_cache
-            # i.e. for later use by paged attention
-            key_cache, value_cache = PagedAttention.split_kv_cache(
-                kv_cache, self.num_kv_heads, self.head_size)
-
-            if (key is not None) and (value is not None):
-
-                if attn_type == AttentionType.ENCODER_DECODER:
-                    # Update cross-attention KV cache (prefill-only)
-                    # During cross-attention decode, key & value will be None,
-                    # preventing this IF-statement branch from running
-                    updated_slot_mapping = attn_metadata.cross_slot_mapping
-                else:
-                    # Update self-attention KV cache (prefill/decode)
-                    updated_slot_mapping = attn_metadata.slot_mapping
-
-                # Reshape the input keys and values and store them in the cache.
-                # If kv_cache is not provided, the new key and value tensors are
-                # not cached. This happens during the initial memory
-                # profiling run.
+            if key_cache_defined_in_scope and (key is not None) and (value is not None):
+                logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] Attempting PagedAttention.write_to_paged_cache.")
+                # ... (rest of the write_to_paged_cache logic) ...
                 PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping,
+                    key, value, key_cache, value_cache, updated_slot_mapping, # Uses defined key_cache
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
+                logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] PagedAttention.write_to_paged_cache successful.")
+
+        else: # Condition for splitting kv_cache was false
+            logger.error(
+                f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] SKIPPED PagedAttention.split_kv_cache. "
+                f"Reason: attn_type={attn_type} (is ENCODER? {attn_type == AttentionType.ENCODER}), "
+                f"kv_cache_valid_for_split={(kv_cache is not None and kv_cache.numel() > 0)}"
+            )
+            # key_cache and value_cache remain undefined in this local scope if this path is taken
+
         (num_prefill_query_tokens, num_prefill_kv_tokens,
-        num_decode_query_tokens) = \
+         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
-        output = torch.empty_like(query)
+        output_tensor = torch.empty_like(query) # Changed variable name from 'output' to 'output_tensor' to avoid conflict with function arg 'output'
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_query_tokens:]
         # QKV for prefill.
-        query = query[:num_prefill_query_tokens]
+        query_prefill = query[:num_prefill_query_tokens] # Renamed to avoid confusion
+        key_prefill = None
+        value_prefill = None
         if key is not None and value is not None:
-            key = key[:num_prefill_kv_tokens]
-            value = value[:num_prefill_kv_tokens]
+            key_prefill = key[:num_prefill_kv_tokens]
+            value_prefill = value[:num_prefill_kv_tokens]
 
-        assert query.shape[0] == num_prefill_query_tokens
+        assert query_prefill.shape[0] == num_prefill_query_tokens
         assert decode_query.shape[0] == num_decode_query_tokens
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0: # This is Cond3
-                # normal attention.
-                # ... (existing code for this block) ...
+            if (_kv_cache_numel == 0 or _block_tables_numel == 0): # Path A
+                logger.error(f"[XF_FWD_PREFILL_PATH_A os.getpid()={os.getpid()}] Taking 'normal attention' path (memory_efficient_xformers_forward).")
                 out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type)
-                assert out.shape == output[:num_prefill_query_tokens].shape
-                output[:num_prefill_query_tokens] = out
-            else:
-                # This is the "prefix-enabled attention" path where the error occurs
-                # Existing Cond3 was false, meaning:
-                # kv_cache.numel() > 0 AND prefill_meta.block_tables.numel() > 0
-
-                # ======= ADD TEMPORARY DEBUG LOGS HERE (START) =======
+                    query_prefill, key_prefill, value_prefill, prefill_meta, attn_type=attn_type)
+                assert out.shape == output_tensor[:num_prefill_query_tokens].shape
+                output_tensor[:num_prefill_query_tokens] = out
+            else: # Path B (prefix-enabled attention)
                 logger.error(
-                    f"[XFORMERS_PREFIX_PATH_DEBUG] Entered PagedAttention.forward_prefix path. "
-                    f"attn_type: {attn_type}, "
-                    f"kv_cache.numel(): {kv_cache.numel() if kv_cache is not None else 'None'}, "
-                    f"block_tables.numel(): {prefill_meta.block_tables.numel() if prefill_meta.block_tables is not None else 'None'}."
+                    f"[XF_FWD_PREFILL_PATH_B os.getpid()={os.getpid()}] Taking 'prefix attention' path (PagedAttention.forward_prefix). "
+                    f"key_cache defined in scope? {key_cache_defined_in_scope}"
                 )
-                
-                # Check if key_cache is defined at this point
-                is_key_cache_defined = 'key_cache' in locals()
-                logger.error(f"[XFORMERS_PREFIX_PATH_DEBUG] Is 'key_cache' defined in locals()? {is_key_cache_defined}")
-
-                if not is_key_cache_defined:
-                    logger.error(
-                        f"[XFORMERS_PREFIX_PATH_DEBUG] CRITICAL: key_cache is UNDEFINED right before PagedAttention.forward_prefix call! "
-                        f"This should not happen if conditions for this path are met and attn_type is 'decoder'."
+                if not key_cache_defined_in_scope:
+                    logger.critical(
+                        f"[XF_FWD_PREFILL_PATH_B_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering prefix path but key_cache was NOT defined by split_kv_cache! This will cause UnboundLocalError."
+                        f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}, block_tables.numel={_block_tables_numel}"
                     )
-                    # Log the conditions that *should have* defined key_cache
-                    cond_for_split = (attn_type != AttentionType.ENCODER and kv_cache is not None and kv_cache.numel() > 0)
-                    logger.error(f"[XFORMERS_PREFIX_PATH_DEBUG] Conditions for defining key_cache (attn_type != ENCODER and kv_cache.numel() > 0): {cond_for_split}")
-                # ======= ADD TEMPORARY DEBUG LOGS HERE (END) =======
-                assert attn_type != AttentionType.ENCODER_ONLY, (
-                    "Encoder-only models should not have prefix attention.")
-
+                    # This is the problematic scenario. For safety, we could raise here to prevent the UnboundLocalError
+                    # raise RuntimeError("key_cache not defined before PagedAttention.forward_prefix due to logic error or unexpected state.")
+                
+                assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have prefix attention.")
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
+                
+                # Ensure key_cache and value_cache are passed only if defined (though if not defined, error occurs)
+                current_key_cache = key_cache if key_cache_defined_in_scope else None # This won't fix UnboundLocalError if it's used directly
+                current_value_cache = value_cache if key_cache_defined_in_scope else None # but good for PagedAttention if it handles None
 
-                # prefix-enabled attention
-                # TODO(Hai) this triton kernel has regression issue (broke) to
-                # deal with different data types between KV and FP8 KV cache,
-                # to be addressed separately.
+                if not key_cache_defined_in_scope: # Actually stop if it's not defined
+                    raise UnboundLocalError("Manually raising: key_cache is about to be used in PagedAttention.forward_prefix but was not defined.")
+
                 out = PagedAttention.forward_prefix(
-                    query,
-                    key,
-                    value,
+                    query_prefill,
+                    key_prefill,
+                    value_prefill,
                     self.kv_cache_dtype,
-                    key_cache,
+                    key_cache,  # Line 609/620 - where UnboundLocalError occurs
                     value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
@@ -626,23 +604,28 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                assert output[:num_prefill_query_tokens].shape == out.shape
-                output[:num_prefill_query_tokens] = out
+                assert output_tensor[:num_prefill_query_tokens].shape == out.shape
+                output_tensor[:num_prefill_query_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-            assert attn_type != AttentionType.ENCODER_ONLY, (
-                "Encoder-only models should not have decode metadata.")
+            logger.error(
+                f"[XF_FWD_DECODE_PATH os.getpid()={os.getpid()}] Taking 'decode' path (PagedAttention.forward_decode). "
+                f"key_cache defined in scope? {key_cache_defined_in_scope}"
+            )
+            if not key_cache_defined_in_scope:
+                logger.critical(
+                    f"[XF_FWD_DECODE_PATH_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering decode path but key_cache was NOT defined by split_kv_cache! This will cause UnboundLocalError."
+                     f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}, block_tables.numel={_block_tables_numel}" # block_tables might not be relevant for decode check
+                )
+                raise UnboundLocalError("Manually raising: key_cache is about to be used in PagedAttention.forward_decode but was not defined.")
 
-            (
-                seq_lens_arg,
-                max_seq_len_arg,
-                block_tables_arg,
-            ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
+            assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have decode metadata.")
+            (seq_lens_arg, max_seq_len_arg, block_tables_arg) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
-            output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
+            output_tensor[num_prefill_query_tokens:] = PagedAttention.forward_decode(
                 decode_query,
-                key_cache,
-                value_cache,
+                key_cache, # Uses key_cache
+                value_cache, # Uses value_cache
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
@@ -655,7 +638,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             )
 
         # Reshape the output tensor.
-        return output.view(-1, self.num_heads * self.head_size)
+        return output_tensor.view(-1, self.num_heads * self.head_size)
 
     def _run_memory_efficient_xformers_forward(
         self,
