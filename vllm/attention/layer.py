@@ -374,89 +374,21 @@ def unified_attention(
     value: torch.Tensor,
     layer_name: str,
 ) -> torch.Tensor:
-    # ---- UNIFIED_ATTENTION DEBUG LOGS START ----
-    current_pid = os.getpid()
-    # Assuming PIDs like 10099, 11282, 12582, 14347, 20794 are for worker 1 (rank 1)
-    # You can get self.rank if 'self_module' below is the actual worker object, or from a global context.
-    # For now, we'll rely on PID for targeted logging.
-    # is_target_worker_rank1 = (current_pid == 20794) # Adjust PID as needed
+    wait_for_kv_layer_from_connector(layer_name)
 
-    # Get context and the 'self' module (which is an attention layer instance)
-    # Ensure get_current_forward_context() and ForwardContext are correctly defined/imported
-    forward_context: Optional[ForwardContext] = get_current_forward_context()
-    
-    if forward_context is None:
-        logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer {layer_name}: ForwardContext is None! Cannot proceed.")
-        # Handle this case appropriately, maybe raise an error or return dummy output if that's ever expected.
-        # For now, let's assume it won't be None in normal operation leading to this point.
-        raise RuntimeError(f"ForwardContext is None for layer {layer_name}, pid {current_pid}")
-
+    forward_context: ForwardContext = get_forward_context()
     attn_metadata = forward_context.attn_metadata
-    self_module = forward_context.no_compile_layers[layer_name] # This is the Attention op instance
-
-    # Log for the target worker during decode steps
-    # is_decode_step = attn_metadata is not None and attn_metadata.num_prefills == 0 and attn_metadata.num_decode_tokens > 0
-    # Let's log always for the target worker for now to see the state.
-    # We can get rank if self_module has it, e.g. self_module.rank (depends on what self_module is)
-    # For now, using PID for targeting worker 1 based on previous logs.
-    # Replace 20794 with the current PID of your worker 1 if it changes.
-    if current_pid == 20794: 
-        logger.error(
-            f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. "
-            f"Current forward_context.virtual_engine: {forward_context.virtual_engine}. "
-            f"Type of self_module (layer instance): {type(self_module)}. "
-            f"Does self_module have 'kv_cache' attribute? {hasattr(self_module, 'kv_cache')}. "
-            f"Is self_module.impl XFormersImpl? {isinstance(getattr(self_module, 'impl', None), XFormersImpl) if 'XFormersImpl' in globals() else 'XFormersImpl_not_in_globals'}"
-        )
-        if hasattr(self_module, 'kv_cache'):
-            module_kv_cache_attr = self_module.kv_cache
-            logger.error(
-                f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. "
-                f"  self_module.kv_cache type: {type(module_kv_cache_attr)}. "
-                f"Is List? {isinstance(module_kv_cache_attr, list)}. "
-            )
-            if isinstance(module_kv_cache_attr, list):
-                logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}.   len(self_module.kv_cache): {len(module_kv_cache_attr)}")
-                # Log contents if it's short, or specific indices
-                # What is at index forward_context.virtual_engine (which is 0 for worker 1's problematic calls)?
-                ve_idx_from_context = forward_context.virtual_engine
-                if ve_idx_from_context < len(module_kv_cache_attr):
-                    cache_at_ve_idx = module_kv_cache_attr[ve_idx_from_context]
-                    logger.error(
-                        f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. "
-                        f"  Cache at self_module.kv_cache[{ve_idx_from_context}]: type={type(cache_at_ve_idx)}, "
-                        f"Shape: {cache_at_ve_idx.shape if hasattr(cache_at_ve_idx, 'shape') else 'N/A'}, "
-                        f"Numel: {cache_at_ve_idx.numel() if hasattr(cache_at_ve_idx, 'numel') else 'N/A'}, "
-                        f"Dtype: {cache_at_ve_idx.dtype if hasattr(cache_at_ve_idx, 'dtype') else 'N/A'}"
-                    )
-                else:
-                    logger.error(
-                        f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. "
-                        f"  forward_context.virtual_engine ({ve_idx_from_context}) is OUT OF BOUNDS for self_module.kv_cache (len {len(module_kv_cache_attr)})."
-                    )
-            elif module_kv_cache_attr is None:
-                 logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}.   self_module.kv_cache is None.")
-
-        # Also log self.k_cache and self.v_cache if they exist (standard vLLM way)
-        if hasattr(self_module, 'k_cache') and self_module.k_cache is not None:
-            logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. Found self_module.k_cache. Shape: {self_module.k_cache.shape}, Numel: {self_module.k_cache.numel()}")
-        else:
-            logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer: {layer_name}. self_module.k_cache is None or does not exist.")
-    # ---- UNIFIED_ATTENTION DEBUG LOGS END ----
-
-    # This line is where the kv_cache for the impl.forward is determined in your code
-    kv_cache_for_impl = self_module.kv_cache[forward_context.virtual_engine]
-
-    # Your existing logging for kv_cache_for_impl (this was already good)
-    if kv_cache_for_impl is not None:
-        logger.error(f"[ATTN_LAYER_DEBUG pid={current_pid}] Layer {layer_name}: Passing to impl.forward: kv_cache.shape={kv_cache_for_impl.shape}, kv_cache.numel={kv_cache_for_impl.numel()}, is_prefill={attn_metadata.num_prefills > 0 if attn_metadata else 'N/A'}")
+    self = forward_context.no_compile_layers[layer_name]
+    kv_cache = self.kv_cache[forward_context.virtual_engine]
+    if kv_cache is not None:
+        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache.shape={kv_cache.shape}, kv_cache.numel={kv_cache.numel()}, is_prefill={attn_metadata.num_prefills > 0}")
     else:
-        logger.error(f"[ATTN_LAYER_DEBUG pid={current_pid}] Layer {layer_name}: Passing to impl.forward: kv_cache is None, is_prefill={attn_metadata.num_prefills > 0 if attn_metadata else 'N/A'}")
-    
-    # Ensure 'self_module' is what 'self.impl.forward' expects as its first 'layer' argument
-    # (which is usually the AttentionOp instance itself)
-    output = self_module.impl.forward(self_module, query, key, value, kv_cache_for_impl,
-                                     attn_metadata)
+        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache is None, is_prefill={attn_metadata.num_prefills > 0}")
+    output = self.impl.forward(self, query, key, value, kv_cache,
+                               attn_metadata)
+
+    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    return output
 
 
 def unified_attention_fake(
