@@ -17,6 +17,7 @@ from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.distributed.kv_transfer import (get_kv_transfer_group,
                                           has_kv_transfer_group,
                                           is_v1_kv_transfer_group)
+from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.forward_context import ForwardContext, get_forward_context
 from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.base_config import (
@@ -367,27 +368,80 @@ def maybe_save_kv_layer_to_connector(
 
     connector.save_kv_layer(layer_name, kv_cache_layer, attn_metadata)
 
-
 def unified_attention(
     query: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    layer_name: str,
+    layer_name: str,  # Used to get the specific AttentionOp module instance
 ) -> torch.Tensor:
-    wait_for_kv_layer_from_connector(layer_name)
+    wait_for_kv_layer_from_connector(layer_name) 
 
-    forward_context: ForwardContext = get_forward_context()
+    current_pid = os.getpid()
+    forward_context: Optional[ForwardContext] = get_forward_context()
+
+    if forward_context is None:
+        logger.critical(f"[UNIFIED_ATTN pid={current_pid} layer='{layer_name}'] ForwardContext is None! This is a critical error.")
+        # Return an empty tensor or raise, an empty tensor will likely lead to downstream errors seen before
+        return torch.empty_like(query) # Or raise an explicit error
+
     attn_metadata = forward_context.attn_metadata
-    self = forward_context.no_compile_layers[layer_name]
-    kv_cache = self.kv_cache[forward_context.virtual_engine]
-    if kv_cache is not None:
-        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache.shape={kv_cache.shape}, kv_cache.numel={kv_cache.numel()}, is_prefill={attn_metadata.num_prefills > 0}")
-    else:
-        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache is None, is_prefill={attn_metadata.num_prefills > 0}")
-    output = self.impl.forward(self, query, key, value, kv_cache,
-                               attn_metadata)
+    # self_module is the vllm.attention.layer.Attention instance for this specific layer
+    self_module = forward_context.no_compile_layers[layer_name] 
+    
+    request_virtual_engine = forward_context.virtual_engine # VE from the (misaddressed) request, e.g., 0 for worker 1
 
-    maybe_save_kv_layer_to_connector(layer_name, kv_cache)
+    # Determine the ACTUAL pipeline stage rank of the worker executing this code
+    actual_worker_pp_rank = 0 # Default if PP is not active or rank cannot be determined
+    pipeline_world_size = 1
+    if torch.distributed.is_initialized():
+        pp_group = get_pp_group()
+        if pp_group is not None and hasattr(pp_group, 'world_size'):
+            pipeline_world_size = pp_group.world_size
+            if pipeline_world_size > 1 and hasattr(pp_group, 'rank_in_group'):
+                actual_worker_pp_rank = pp_group.rank_in_group
+    
+    log_prefix_ua = f"[UNIFIED_ATTN pid={current_pid} layer='{layer_name}' req_VE={request_virtual_engine} actual_pp_rank={actual_worker_pp_rank}]"
+
+    kv_cache_for_impl = None # Initialize
+
+    if not hasattr(self_module, 'kv_cache') or self_module.kv_cache is None:
+        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache attribute is missing or None.")
+    elif not isinstance(self_module.kv_cache, list):
+        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache is not a list (type: {type(self_module.kv_cache)}). Expected list due to bind_single_layer_kv_cache logic.")
+    elif len(self_module.kv_cache) != pipeline_world_size and pipeline_world_size > 0 : # Check if list length matches PP size if PP is active
+        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache list length ({len(self_module.kv_cache)}) "
+                       f"mismatches pipeline_world_size ({pipeline_world_size}).")
+    elif actual_worker_pp_rank >= len(self_module.kv_cache):
+        logger.error(f"{log_prefix_ua} CRITICAL: actual_worker_pp_rank ({actual_worker_pp_rank}) "
+                       f"is out of bounds for self_module.kv_cache (len: {len(self_module.kv_cache)}).")
+    else:
+        # *** THE KEY CHANGE: Use actual_worker_pp_rank for indexing ***
+        kv_cache_for_impl = self_module.kv_cache[actual_worker_pp_rank]
+        if kv_cache_for_impl is None:
+            logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache[{actual_worker_pp_rank}] (using actual rank) is None! "
+                           f"This implies bind_single_layer_kv_cache failed to set it for this worker's stage.")
+        
+    # Log the KV cache tensor that will be passed to the backend implementation
+    # This is similar to your existing logging block.
+    _is_prefill_log = attn_metadata.num_prefills > 0 if attn_metadata else "N/A (no attn_metadata)"
+    if kv_cache_for_impl is not None:
+        logger.error(
+            f"{log_prefix_ua} Passing to impl.forward: "
+            f"kv_cache.shape={kv_cache_for_impl.shape}, kv_cache.numel={kv_cache_for_impl.numel()}, "
+            f"dtype={kv_cache_for_impl.dtype}, is_prefill={_is_prefill_log}"
+        )
+        if kv_cache_for_impl.numel() == 0:
+             logger.error(f"{log_prefix_ua} WARNING: kv_cache_for_impl has numel=0 before passing to impl.forward.")
+    else:
+        logger.error(
+            f"{log_prefix_ua} Passing to impl.forward: kv_cache is None, is_prefill={_is_prefill_log}"
+        )
+
+    # Call the attention backend implementation (e.g., XFormersImpl.forward)
+    # 'self_module' is the AttentionOp instance, 'self_module.impl' is the backend
+    output = self_module.impl.forward(self_module, query, key, value, kv_cache_for_impl, attn_metadata)
+
+    # maybe_save_kv_layer_to_connector(layer_name, kv_cache_for_impl) # Your custom logic
     return output
 
 
