@@ -6,6 +6,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import os
+from vllm.logger import init_logger
+
+logger = init_logger(__name__)
 
 import vllm.envs as envs
 from vllm.attention import AttentionType
