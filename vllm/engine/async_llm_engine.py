@@ -271,49 +271,90 @@ class _AsyncLLMEngine(LLMEngine):
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
-        logger.error(
-            f"[LLM_ENGINE_STEP_ENTRY pid={os.getpid()}] "
-            f"Method called with virtual_engine argument: {virtual_engine}"
-        )
-        """Performs one decoding iteration and returns newly generated results.
-        The workers are ran asynchronously if possible.
+    # Your existing entry log - this one prints for VE=0 and VE=1
+    logger.error(
+        f"[LLM_ENGINE_STEP_ENTRY pid={os.getpid()}] "
+        f"Method called with virtual_engine argument: {virtual_engine}"
+    )
+    
+    current_pid_sas = os.getpid() # For subsequent logs
+    log_prefix_sas = f"[LLM_ENGINE_STEP pid={current_pid_sas} VE={virtual_engine}]"
 
-        This function performs one decoding iteration of the engine. It first
-        schedules the sequences to be executed in the next iteration and the
-        token blocks to be swapped in/out/copy. Then, it executes the model
-        and updates the scheduler with the model outputs. Finally, it decodes
-        the sequences and returns the newly generated results.
-        """
-        # these are cached outputs from previous iterations. None if on first
-        # iteration
-        cached_outputs = self.cached_scheduler_outputs[virtual_engine]
-        seq_group_metadata_list = cached_outputs.seq_group_metadata_list
-        scheduler_outputs = cached_outputs.scheduler_outputs
-        allow_async_output_proc = cached_outputs.allow_async_output_proc
+    # Safety check for cached_scheduler_outputs access
+    if virtual_engine >= len(self.cached_scheduler_outputs):
+        logger.critical(f"{log_prefix_sas} CRITICAL_ERROR: virtual_engine {virtual_engine} is out of bounds for self.cached_scheduler_outputs (len {len(self.cached_scheduler_outputs)}). Aborting step for this VE.")
+        return [] # Cannot proceed if this occurs
 
-        ctx = self.scheduler_contexts[virtual_engine]
+    cached_outputs = self.cached_scheduler_outputs[virtual_engine]
+    seq_group_metadata_list = cached_outputs.seq_group_metadata_list
+    # scheduler_outputs is initially from cache, may be updated by self.scheduler[virtual_engine].schedule()
+    current_scheduler_outputs = cached_outputs.scheduler_outputs 
+    allow_async_output_proc = cached_outputs.allow_async_output_proc
 
-        # Clear outputs for each new scheduler iteration
-        ctx.request_outputs.clear()
+    # Log initial state for VE=1
+    if virtual_engine == 1:
+        logger.error(f"{log_prefix_sas} Initial state for VE=1: "
+                     f"cached_outputs.seq_group_metadata_list is None? {seq_group_metadata_list is None}. "
+                     f"Len if not None: {len(seq_group_metadata_list) if seq_group_metadata_list is not None else 'N/A'}. "
+                     f"cached_outputs.scheduler_outputs.is_empty()?: {current_scheduler_outputs.is_empty() if current_scheduler_outputs else 'N/A (scheduler_outputs is None)'}")
 
-        # skip the scheduler if there are any remaining steps in the seq groups.
-        # This ensures that the scheduler is only called again when the current
-        # batch has completed.
-        if not self._has_remaining_steps(seq_group_metadata_list):
+    # Safety check for scheduler_contexts access
+    if virtual_engine >= len(self.scheduler_contexts):
+        logger.critical(f"{log_prefix_sas} CRITICAL_ERROR: virtual_engine {virtual_engine} is out of bounds for self.scheduler_contexts (len {len(self.scheduler_contexts)}). Aborting step for this VE.")
+        return []
+    ctx = self.scheduler_contexts[virtual_engine]
+    ctx.request_outputs.clear()
 
-            # Schedule iteration
-            (seq_group_metadata_list, scheduler_outputs,
-             allow_async_output_proc
-             ) = self.scheduler[virtual_engine].schedule()
+    # Evaluate _has_remaining_steps
+    # Note: _has_remaining_steps might expect a non-None list.
+    # It iterates through seq_group_metadata_list and checks state.remaining_steps.
+    # If seq_group_metadata_list is None or empty from cache, has_remaining_steps_val should be False.
+    has_remaining_steps_val = False
+    if seq_group_metadata_list is not None and len(seq_group_metadata_list) > 0:
+        has_remaining_steps_val = self._has_remaining_steps(seq_group_metadata_list)
+    
+    if virtual_engine == 1:
+        logger.error(f"{log_prefix_sas} For VE=1: self._has_remaining_steps() evaluated to: {has_remaining_steps_val}")
 
-            ctx.seq_group_metadata_list = seq_group_metadata_list
-            ctx.scheduler_outputs = scheduler_outputs
+    if not has_remaining_steps_val:
+        if virtual_engine == 1:
+            logger.error(f"{log_prefix_sas} For VE=1: Condition '_has_remaining_steps is False' is MET. Proceeding to call scheduler.")
 
-            if not scheduler_outputs.is_empty():
-                # this will cause mamba_cache/minimax_cache failed
-                # to release finished_requests_ids of the last steps
-                finished_requests_ids = self.scheduler[
-                    virtual_engine].get_and_reset_finished_requests_ids()
+        # Safety check for self.scheduler access
+        if virtual_engine >= len(self.scheduler):
+            logger.critical(f"{log_prefix_sas} CRITICAL_ERROR: virtual_engine {virtual_engine} is out of bounds for self.scheduler (len {len(self.scheduler)}). Aborting step for this VE.")
+            return []
+            
+        # Schedule iteration - this updates scheduler_outputs and seq_group_metadata_list
+        (scheduled_seq_group_metadata_list, 
+         new_scheduler_outputs, # Use a new variable name
+         new_allow_async_output_proc
+         ) = self.scheduler[virtual_engine].schedule()
+        
+        # Update the variables that the rest of the function uses
+        seq_group_metadata_list = scheduled_seq_group_metadata_list
+        scheduler_outputs = new_scheduler_outputs # IMPORTANT: Use the new outputs from schedule()
+        allow_async_output_proc = new_allow_async_output_proc
+
+        if virtual_engine == 1:
+            logger.error(f"{log_prefix_sas} For VE=1: Called scheduler[{virtual_engine}].schedule().")
+            logger.error(f"{log_prefix_sas}   Resulting scheduler_outputs.is_empty()?: {scheduler_outputs.is_empty() if scheduler_outputs else 'N/A'}")
+            if scheduler_outputs and hasattr(scheduler_outputs, 'num_scheduled_seq_groups'):
+                 logger.error(f"{log_prefix_sas}   Resulting scheduler_outputs.num_scheduled_seq_groups: {scheduler_outputs.num_scheduled_seq_groups}")
+            if scheduler_outputs and hasattr(scheduler_outputs, 'scheduled_seq_groups'):
+                 logger.error(f"{log_prefix_sas}   Resulting scheduler_outputs.scheduled_seq_groups length: {len(scheduler_outputs.scheduled_seq_groups)}")
+
+
+        ctx.seq_group_metadata_list = seq_group_metadata_list
+        ctx.scheduler_outputs = scheduler_outputs
+
+        # This 'if' block is where ExecuteModelRequest is created
+        if not scheduler_outputs.is_empty():
+            if virtual_engine == 1:
+                logger.error(f"{log_prefix_sas} For VE=1: Condition 'not scheduler_outputs.is_empty()' is MET. Will create ExecuteModelRequest.")
+            
+            finished_requests_ids = self.scheduler[
+                virtual_engine].get_and_reset_finished_requests_ids()
 
             # Maybe switch from async mode to sync mode
             if not allow_async_output_proc and len(ctx.output_queue) > 0:
@@ -326,18 +367,28 @@ class _AsyncLLMEngine(LLMEngine):
                 self._cache_scheduler_outputs_for_multi_step(
                     virtual_engine, seq_group_metadata_list, scheduler_outputs,
                     allow_async_output_proc)
-        else:
+            else: # scheduler_outputs IS empty
+                if virtual_engine == 1:
+                     logger.error(f"{log_prefix_sas} For VE=1: Condition 'not scheduler_outputs.is_empty()' is FALSE. ExecuteModelRequest will NOT be created here.")
+        else: # _has_remaining_steps_val was TRUE
+            if virtual_engine == 1:
+                logger.error(f"{log_prefix_sas} For VE=1: Condition '_has_remaining_steps is False' is NOT MET (it's true). Scheduling skipped. ExecuteModelRequest will NOT be created here.")
             finished_requests_ids = list()
 
+        # Assertions from original code - might fail if paths above don't set vars
+        if seq_group_metadata_list is None: # Check before assert
+            logger.error(f"{log_prefix_sas} CRITICAL_ASSERT_FAIL: seq_group_metadata_list is None before assert!")
         assert seq_group_metadata_list is not None
+        
+        if scheduler_outputs is None: # Check before assert
+            logger.error(f"{log_prefix_sas} CRITICAL_ASSERT_FAIL: scheduler_outputs is None before assert!")
         assert scheduler_outputs is not None
 
+        # This is the main block for creating request and executing model
         if not scheduler_outputs.is_empty():
-
-            # Check if we have a cached last_output from the previous iteration.
-            # For supporting PP this is probably the best way to pass the
-            # sampled_token_ids, as a separate broadcast over all the PP stages
-            # will cause one virtual engine's microbatch to block the pipeline.
+            logger.error( # General log for any VE entering this critical block
+                f"{log_prefix_sas} Entered block to create ExecuteModelRequest because scheduler_outputs was not empty."
+            )
             last_sampled_token_ids = \
                 self._get_last_sampled_token_ids(virtual_engine)
 
@@ -346,43 +397,44 @@ class _AsyncLLMEngine(LLMEngine):
                 blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
                 blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
                 blocks_to_copy=scheduler_outputs.blocks_to_copy,
-                virtual_engine=virtual_engine,
+                virtual_engine=virtual_engine, # Uses the method's virtual_engine parameter
                 num_lookahead_slots=scheduler_outputs.num_lookahead_slots,
                 running_queue_size=scheduler_outputs.running_queue_size,
                 finished_requests_ids=finished_requests_ids,
-                # We use ExecuteModelRequest to pass the last sampled_token_ids
-                # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids)
 
+            # Your existing REQ_CREATED log
             logger.error(
-                f"[LLM_ENGINE_REQ_CREATED pid={os.getpid()}] "
-                f"For input virtual_engine={virtual_engine}: " # Log the method parameter again for context
+                f"[LLM_ENGINE_REQ_CREATED pid={current_pid_step_async} VE={virtual_engine}] "
+                f"For input virtual_engine={virtual_engine}: " 
                 f"CREATED ExecuteModelRequest with req.virtual_engine field: {execute_model_req.virtual_engine}"
             )
 
-            if allow_async_output_proc:
+            if allow_async_output_proc: # Ensure allow_async_output_proc is defined
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
 
+            # Your existing TO_EXECUTOR log
             logger.error(
-                f"[LLM_ENGINE_TO_EXECUTOR pid={os.getpid()}] "
-                f"For input virtual_engine={virtual_engine}: " # Method parameter
+                f"[LLM_ENGINE_TO_EXECUTOR pid={current_pid_step_async} VE={virtual_engine}] "
+                f"For input virtual_engine={virtual_engine}: "
                 f"Calling model_executor.execute_model_async with ExecuteModelRequest "
                 f"whose req.virtual_engine field is: {execute_model_req.virtual_engine}"
             )
-
-            # Execute the model.
+            
             outputs = await self.model_executor.execute_model_async(
                 execute_model_req)
-
-            # we need to do this here so that last step's sampled_token_ids can
-            # be passed to the next iteration for PP.
-            if self.scheduler_config.is_multi_step:
+            
+            if self.scheduler_config.is_multi_step: # Ensure scheduler_config is accessible
                 self._update_cached_scheduler_output(virtual_engine, outputs)
-        else:
-            if len(ctx.output_queue) > 0:
+        else: # scheduler_outputs WAS empty from the start or after scheduling
+            logger.error(
+                f"{log_prefix_sas} Condition 'not scheduler_outputs.is_empty()' is FALSE (re-check). "
+                f"No model execution will occur in this step_async call. Setting outputs to []."
+            )
+            if ctx is not None and hasattr(ctx, 'output_queue') and len(ctx.output_queue) > 0: # Ensure ctx is valid
                 self._process_model_outputs(ctx=ctx)
-            outputs = []
+            outputs = [] # This was in the original code
 
         # Finish the current step for all the sequence groups.
         if self.scheduler_config.is_multi_step:
