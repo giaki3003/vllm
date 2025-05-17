@@ -338,21 +338,30 @@ class Worker(LocalOrDistributedWorkerBase):
 
         This also warms up the model, which may record CUDA graphs.
         """
-# Determine the rank of this worker to pick its specific block counts.
+        # Determine the rank of this worker to pick its specific block counts.
         # self.rank is the global rank.
         # If pipeline parallelism is used, workers are typically indexed 0 to PP_SIZE-1
         # within the context of the list passed from the executor.
         # The list gpu_blocks_per_worker should be ordered by global rank.
-        my_rank_in_world = self.rank 
+        my_rank_in_world = self.rank
         my_gpu_blocks = gpu_blocks_per_worker[my_rank_in_world]
         my_cpu_blocks = cpu_blocks_per_worker[my_rank_in_world]
 
         logger.info(f"Worker rank {my_rank_in_world}: Using GPU blocks: {my_gpu_blocks}, CPU blocks: {my_cpu_blocks}")
+        
+        # REMOVE THE FOLLOWING LINE:
+        # self.cache_engine.initialize_per_gpu_caches(my_gpu_blocks, my_cpu_blocks)
+        # This line caused the AttributeError because self.cache_engine is None at this point,
+        # and the method initialize_per_gpu_caches was removed from CacheEngine.
+
         raise_if_cache_size_invalid(
             my_gpu_blocks, self.cache_config.block_size,
             self.cache_config.is_attention_free,
             self.model_config.max_model_len)
 
+        # These lines are important: they ensure that when _init_cache_engine
+        # creates the CacheEngine using self.cache_config, it gets the
+        # correct per-worker block counts via the fallback mechanism in CacheEngine.__init__.
         self.cache_config.num_gpu_blocks = my_gpu_blocks
         self.cache_config.num_cpu_blocks = my_cpu_blocks
 
@@ -363,7 +372,9 @@ class Worker(LocalOrDistributedWorkerBase):
             from contextlib import nullcontext
             context = nullcontext()
         with context:
-            self._init_cache_engine()
+            # This method will now correctly instantiate self.cache_engine
+            # using the updated self.cache_config.
+            self._init_cache_engine() 
         self._warm_up_model()
 
     def _init_cache_engine(self):
