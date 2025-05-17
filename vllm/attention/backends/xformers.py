@@ -567,15 +567,39 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0: # This is Cond3
                 # normal attention.
-                # block tables are empty if the prompt does not have a cached
-                # prefix.
+                # ... (existing code for this block) ...
                 out = self._run_memory_efficient_xformers_forward(
                     query, key, value, prefill_meta, attn_type=attn_type)
                 assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
             else:
+                # This is the "prefix-enabled attention" path where the error occurs
+                # Existing Cond3 was false, meaning:
+                # kv_cache.numel() > 0 AND prefill_meta.block_tables.numel() > 0
+
+                # ======= ADD TEMPORARY DEBUG LOGS HERE (START) =======
+                logger.error(
+                    f"[XFORMERS_PREFIX_PATH_DEBUG] Entered PagedAttention.forward_prefix path. "
+                    f"attn_type: {attn_type}, "
+                    f"kv_cache.numel(): {kv_cache.numel() if kv_cache is not None else 'None'}, "
+                    f"block_tables.numel(): {prefill_meta.block_tables.numel() if prefill_meta.block_tables is not None else 'None'}."
+                )
+                
+                # Check if key_cache is defined at this point
+                is_key_cache_defined = 'key_cache' in locals()
+                logger.error(f"[XFORMERS_PREFIX_PATH_DEBUG] Is 'key_cache' defined in locals()? {is_key_cache_defined}")
+
+                if not is_key_cache_defined:
+                    logger.error(
+                        f"[XFORMERS_PREFIX_PATH_DEBUG] CRITICAL: key_cache is UNDEFINED right before PagedAttention.forward_prefix call! "
+                        f"This should not happen if conditions for this path are met and attn_type is 'decoder'."
+                    )
+                    # Log the conditions that *should have* defined key_cache
+                    cond_for_split = (attn_type != AttentionType.ENCODER and kv_cache is not None and kv_cache.numel() > 0)
+                    logger.error(f"[XFORMERS_PREFIX_PATH_DEBUG] Conditions for defining key_cache (attn_type != ENCODER and kv_cache.numel() > 0): {cond_for_split}")
+                # ======= ADD TEMPORARY DEBUG LOGS HERE (END) =======
                 assert attn_type != AttentionType.ENCODER_ONLY, (
                     "Encoder-only models should not have prefix attention.")
 
