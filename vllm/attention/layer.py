@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import os
 
 import vllm.envs as envs
 from vllm.attention import AttentionType
@@ -376,6 +377,10 @@ def unified_attention(
     attn_metadata = forward_context.attn_metadata
     self = forward_context.no_compile_layers[layer_name]
     kv_cache = self.kv_cache[forward_context.virtual_engine]
+    if kv_cache is not None:
+        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache.shape={kv_cache.shape}, kv_cache.numel={kv_cache.numel()}, is_prefill={attn_metadata.num_prefills > 0}")
+    else:
+        logger.error(f"[ATTN_LAYER_DEBUG pid={os.getpid()}] Passing to impl.forward: kv_cache is None, is_prefill={attn_metadata.num_prefills > 0}")
     output = self.impl.forward(self, query, key, value, kv_cache,
                                attn_metadata)
 
