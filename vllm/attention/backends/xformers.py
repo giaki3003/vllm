@@ -537,12 +537,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 PagedAttention.write_to_paged_cache(
                     key, value, defined_key_cache_view, defined_value_cache_view, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
-        else:
-            logger.error(
-                f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] SKIPPED PagedAttention.split_kv_cache. "
-                f"Reason: attn_type={attn_type} (is ENCODER? {attn_type == AttentionType.ENCODER}), "
-                f"kv_cache_valid_for_split={(kv_cache is not None and kv_cache.numel() > 0)}"
-            )
         
         (num_prefill_query_tokens, num_prefill_kv_tokens,
          num_decode_query_tokens) = \
