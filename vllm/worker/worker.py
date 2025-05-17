@@ -332,41 +332,75 @@ class Worker(LocalOrDistributedWorkerBase):
             f"This happens when the GPU memory was "
             "not properly cleaned up before initializing the vLLM instance.")
 
+    def initialize_cache(self, gpu_blocks_per_worker: List[int],
+                         cpu_blocks_per_worker: List[int]) -> None:
+        """Allocate GPU and CPU KV cache with the specified number of blocks.
+
+        This also warms up the model, which may record CUDA graphs.
+        """
+        # Determine the rank of this worker to pick its specific block counts.
+        # self.rank is the global rank.
+        # If pipeline parallelism is used, workers are typically indexed 0 to PP_SIZE-1
+        # within the context of the list passed from the executor.
+        # The list gpu_blocks_per_worker should be ordered by global rank.
+        my_rank_in_world = self.rank
+        my_gpu_blocks = gpu_blocks_per_worker[my_rank_in_world]
+        my_cpu_blocks = cpu_blocks_per_worker[my_rank_in_world]
+
+        logger.info(f"Worker rank {my_rank_in_world}: Using GPU blocks: {my_gpu_blocks}, CPU blocks: {my_cpu_blocks}")
+        
+        # REMOVE THE FOLLOWING LINE:
+        # self.cache_engine.initialize_per_gpu_caches(my_gpu_blocks, my_cpu_blocks)
+        # This line caused the AttributeError because self.cache_engine is None at this point,
+        # and the method initialize_per_gpu_caches was removed from CacheEngine.
+
+        raise_if_cache_size_invalid(
+            my_gpu_blocks, self.cache_config.block_size,
+            self.cache_config.is_attention_free,
+            self.model_config.max_model_len)
+
+        # These lines are important: they ensure that when _init_cache_engine
+        # creates the CacheEngine using self.cache_config, it gets the
+        # correct per-worker block counts via the fallback mechanism in CacheEngine.__init__.
+        self.cache_config.num_gpu_blocks = my_gpu_blocks
+        self.cache_config.num_cpu_blocks = my_cpu_blocks
+
+        if self.vllm_config.model_config.enable_sleep_mode:
+            allocator = CuMemAllocator.get_instance()
+            context = allocator.use_memory_pool(tag="kv_cache")
+        else:
+            from contextlib import nullcontext
+            context = nullcontext()
+        with context:
+            # This method will now correctly instantiate self.cache_engine
+            # using the updated self.cache_config.
+            self._init_cache_engine() 
+        self._warm_up_model()
+
     def _init_cache_engine(self):
         assert self.pipeline_stage_rank is not None, "Worker's pipeline_stage_rank not initialized"
         
-        # ---- START PID and RANK IDENTIFICATION FOR LOGGING ----
-        current_pid = os.getpid()
-        log_prefix_parts = [f"pid={current_pid}"]
-        if hasattr(self, 'rank'):
-            log_prefix_parts.append(f"rank={self.rank}")
-        if hasattr(self, 'pipeline_stage_rank'):
-            log_prefix_parts.append(f"pp_stage={self.pipeline_stage_rank}")
-        log_prefix = f"[WORKER_INIT_CACHE_DEBUG {' '.join(log_prefix_parts)}]"
-        # ---- END PID and RANK IDENTIFICATION FOR LOGGING ----
-
         if self.parallel_config.pipeline_parallel_size > 1 and \
-           hasattr(self.parallel_config, '_current_pipeline_stage_counts') and \
-           self.parallel_config._current_pipeline_stage_counts: # Check attribute existence
+           self.parallel_config._current_pipeline_stage_counts:
             num_layers_for_this_stage = self.parallel_config._current_pipeline_stage_counts[self.pipeline_stage_rank]
-            if num_layers_for_this_stage == 0: 
-                logger.warning(
-                    f"{log_prefix} Stage has 0 layers assigned based on VRAM balancing. "
+            if num_layers_for_this_stage == 0: # Stage might have 0 layers if model is small
+                 logger.warning(
+                    f"Worker for stage {self.pipeline_stage_rank} has 0 layers assigned based on VRAM balancing. "
                     f"CacheEngine will be initialized for 1 layer to avoid errors, but this stage might be unused.")
-                num_layers_for_this_stage = 1 
+                 num_layers_for_this_stage = 1 # Avoid CacheEngine error with 0 layers
         else:
+            # Not using pipeline parallelism or VRAM balancing, so this worker has all layers.
             num_layers_for_this_stage = self.model_config.get_num_layers(self.parallel_config)
-            if num_layers_for_this_stage == 0: 
+            if num_layers_for_this_stage == 0: # Fallback for very small models or misconfiguration
                 logger.warning(
-                    f"{log_prefix} num_layers_for_this_stage calculated as 0. "
+                    f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): num_layers_for_this_stage calculated as 0. "
                     f"Defaulting to 1 layer for CacheEngine. Total model layers: {self.model_config.get_num_layers(self.parallel_config)}")
                 num_layers_for_this_stage = 1
 
-        logger.info(f"{log_prefix} Initializing CacheEngine for {num_layers_for_this_stage} layers. "
-                    f"Using cache_config.num_gpu_blocks: {self.cache_config.num_gpu_blocks}, "
-                    f"cache_config.num_cpu_blocks: {self.cache_config.num_cpu_blocks}")
+
+        logger.info(f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): Initializing CacheEngine for {num_layers_for_this_stage} layers.")
         assert self.cache_config.num_gpu_blocks is not None, \
-            f"{log_prefix} num_gpu_blocks is None before CacheEngine init."
+            f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): num_gpu_blocks is None before CacheEngine init."
 
         self.cache_engine = CacheEngine(
             self.cache_config,
@@ -375,71 +409,32 @@ class Worker(LocalOrDistributedWorkerBase):
             self.device_config,
             num_layers_for_this_stage
         )
-        
-        # -------- START LOGGING single_engine_gpu_cache --------
-        single_engine_gpu_cache = self.cache_engine.gpu_cache 
- 
-        logger.error(f"{log_prefix}   single_engine_gpu_cache (from self.cache_engine.gpu_cache): type={type(single_engine_gpu_cache)}")
-        if isinstance(single_engine_gpu_cache, list):
-            logger.error(f"{log_prefix}   single_engine_gpu_cache length: {len(single_engine_gpu_cache)} (expected {num_layers_for_this_stage} for this worker)")
-            if not single_engine_gpu_cache: 
-                 logger.error(f"{log_prefix}   CRITICAL: single_engine_gpu_cache is an EMPTY LIST.")
-            for i, tensor_cache in enumerate(single_engine_gpu_cache):
-                if tensor_cache is not None:
-                    logger.error(
-                        f"{log_prefix}   Layer {i} tensor_cache - "
-                        f"Shape: {tensor_cache.shape}, Numel: {tensor_cache.numel()}, "
-                        f"Dtype: {tensor_cache.dtype}, Device: {tensor_cache.device}"
-                    )
-                    if tensor_cache.numel() == 0:
-                        logger.error(f"{log_prefix}   CRITICAL: Layer {i} tensor_cache has Numel == 0.")
-                else:
-                    logger.error(f"{log_prefix}   CRITICAL: Layer {i} tensor_cache is None.")
-        elif single_engine_gpu_cache is None:
-             logger.error(f"{log_prefix}   CRITICAL: single_engine_gpu_cache is None.")
-        else:
-            logger.error(f"{log_prefix}   single_engine_gpu_cache is NOT a list, type: {type(single_engine_gpu_cache)}.")
-        # -------- END LOGGING single_engine_gpu_cache --------
+        single_engine_gpu_cache = self.cache_engine.gpu_cache # This is List[Tensor]
 
+        # Populate self.gpu_cache as List[Optional[List[Tensor]]] for capture_model compatibility
         self.gpu_cache = [None] * self.parallel_config.pipeline_parallel_size
-        
-        # Check single_engine_gpu_cache before assignment
-        if single_engine_gpu_cache is not None and (not isinstance(single_engine_gpu_cache, list) or len(single_engine_gpu_cache) > 0):
-            # Condition updated: ensure it's not None AND (if it's a list, it's not empty)
-            assert self.pipeline_stage_rank is not None, f"{log_prefix} pipeline_stage_rank is None during gpu_cache setup"
+        if single_engine_gpu_cache is not None: # Ensure cache was actually created
+            assert self.pipeline_stage_rank is not None, "pipeline_stage_rank is None during gpu_cache setup"
             self.gpu_cache[self.pipeline_stage_rank] = single_engine_gpu_cache
-            if is_target_worker_rank1:
-                 logger.error(f"{log_prefix} Target Worker (Rank 1): Assigned single_engine_gpu_cache (type: {type(single_engine_gpu_cache)}, len: {len(single_engine_gpu_cache) if isinstance(single_engine_gpu_cache, list) else 'N/A'}) to self.gpu_cache[{self.pipeline_stage_rank}]")
         else:
-            # This 'else' branch will be hit if single_engine_gpu_cache is None or an empty list.
-            # self.gpu_cache[self.pipeline_stage_rank] will remain None.
-            log_level_for_issue = logger.error if is_target_worker_rank1 else logger.warning
-            log_level_for_issue(
-                f"{log_prefix} "
-                f"{'CRITICAL' if is_target_worker_rank1 else 'WARNING'}: "
-                f"single_engine_gpu_cache is None or empty (type: {type(single_engine_gpu_cache)}, "
-                f"len={len(single_engine_gpu_cache) if isinstance(single_engine_gpu_cache, list) else 'N/A'}) "
-                f"after CacheEngine init. "
-                f"self.gpu_cache[{self.pipeline_stage_rank}] will remain None."
-            )
+            logger.warning(f"Worker rank {self.rank} (PP stage {self.pipeline_stage_rank}): "
+                           f"single_engine_gpu_cache is None after CacheEngine init. "
+                           f"self.gpu_cache will contain all Nones.")
 
-        # KV cache binding logic (remains the same)
+        # KV cache binding logic:
+        # Operates on the actual tensors from single_engine_gpu_cache.
         static_forward_root_ctx = self.compilation_config.static_forward_context
         assert self.pipeline_stage_rank is not None, \
-            f"{log_prefix} pipeline_stage_rank is None in _init_cache_engine for binding."
+            f"Worker rank {self.rank}: pipeline_stage_rank is None in _init_cache_engine for binding."
         pp_rank = self.pipeline_stage_rank
         pp_size = self.parallel_config.pipeline_parallel_size
         
         local_layer_idx = 0
-        # Re-fetch single_engine_gpu_cache for binding, as it's the List[Tensor] for this stage
-        # This ensures we use what was actually put into self.gpu_cache[pp_rank] if anything.
-        # Or, more directly, use self.gpu_cache[pp_rank] if it's guaranteed to be List[Tensor] here
-        cache_to_bind = self.gpu_cache[pp_rank] # This is what ModelRunner will eventually use parts of.
+        # Use single_engine_gpu_cache for binding, as it's the actual List[Tensor] for this stage
+        # single_engine_gpu_cache is self.cache_engine.gpu_cache
+        single_engine_gpu_cache = self.cache_engine.gpu_cache if self.cache_engine else None
 
-        if cache_to_bind is not None and isinstance(cache_to_bind, list) and \
-           hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
-            if is_target_worker_rank1:
-                logger.error(f"{log_prefix} Target Worker (Rank 1): Proceeding with KV cache binding. cache_to_bind length: {len(cache_to_bind)}")
+        if single_engine_gpu_cache is not None and hasattr(self.model_runner, 'model') and self.model_runner.model is not None:
             for global_name, module in self.model_runner.model.named_modules():
                 is_cacheable_layer = hasattr(module, 'attn_type') and \
                                      module.attn_type in (AttentionType.DECODER, AttentionType.ENCODER_DECODER)
@@ -447,15 +442,8 @@ class Worker(LocalOrDistributedWorkerBase):
                 if is_cacheable_layer and not isinstance(module, PPMissingLayer):
                     if global_name in static_forward_root_ctx:
                         layer_static_ctx = static_forward_root_ctx[global_name]
-                        if local_layer_idx < len(cache_to_bind):
-                            cache_tensor_for_this_layer = cache_to_bind[local_layer_idx]
-                            if cache_tensor_for_this_layer is None or cache_tensor_for_this_layer.numel() == 0 :
-                                if is_target_worker_rank1:
-                                    logger.error(f"{log_prefix} Target Worker (Rank 1): For binding layer {global_name} (local_idx {local_layer_idx}), "
-                                                 f"cache_tensor_for_this_layer is None or empty! Shape: {cache_tensor_for_this_layer.shape if cache_tensor_for_this_layer is not None else 'None'}")
-                                # Depending on strictness, you might want to skip binding or error out.
-                                # For now, original logic would proceed and potentially fail in bind_single_layer_kv_cache if tensor is bad.
-                            
+                        if local_layer_idx < len(single_engine_gpu_cache):
+                            cache_tensor_for_this_layer = single_engine_gpu_cache[local_layer_idx]
                             bind_single_layer_kv_cache(
                                 layer_static_ctx,
                                 cache_tensor_for_this_layer,
@@ -464,19 +452,24 @@ class Worker(LocalOrDistributedWorkerBase):
                             )
                             local_layer_idx += 1
                         else:
-                            logger.error(f"{log_prefix} "
-                                       f"Mismatch between iterable model layers and cache_to_bind size. "
-                                       f"Attempted to access cache_to_bind index {local_layer_idx} "
-                                       f"for layer {global_name}, but cache size is {len(cache_to_bind)}.")
-                            break 
+                            # This logger is available globally in the module
+                            logger.error(f"Worker rank {self.rank} (PP stage {pp_rank}): "
+                                           f"Mismatch between iterable model layers and single_engine_gpu_cache size. "
+                                           f"Attempted to access single_engine_gpu_cache index {local_layer_idx} "
+                                           f"for layer {global_name}, but cache size is {len(single_engine_gpu_cache)}.")
+                            break
+                    # else:
+                        # logger.debug(f"Worker rank {self.rank} (PP stage {pp_rank}): "
+                        #             f"Layer {global_name} not found in static_forward_context.")
             
-            if cache_to_bind and local_layer_idx != len(cache_to_bind):
-                 logger.warning(f"{log_prefix} Not all tensors in cache_to_bind were bound to layers. Bound: {local_layer_idx}, Total: {len(cache_to_bind)}")
+            if single_engine_gpu_cache and local_layer_idx != len(single_engine_gpu_cache):
+                 # logger.warning or debug if not all tensors in single_engine_gpu_cache were bound.
+                 pass
                  
-        elif cache_to_bind is None or not isinstance(cache_to_bind, list):
-            logger.warning(f"{log_prefix} cache_to_bind is None or not a list (type: {type(cache_to_bind)}), skipping kv_cache binding.")
-        elif not hasattr(self.model_runner, 'model') or self.model_runner.model is None:
-            logger.warning(f"{log_prefix} model_runner.model not available, skipping kv_cache binding.")
+        elif single_engine_gpu_cache is None:
+            logger.warning(f"Worker rank {self.rank} (PP stage {pp_rank}): single_engine_gpu_cache is None, skipping kv_cache binding.")
+        else: # model_runner.model is None or not hasattr
+            logger.warning(f"Worker rank {self.rank} (PP stage {pp_rank}): model_runner.model not available, skipping kv_cache binding.")
 
     def _warm_up_model(self) -> None:
         # warm up sizes that are not in cudagraph capture sizes,
