@@ -11,6 +11,8 @@ from weakref import ReferenceType
 
 from typing_extensions import deprecated
 
+import os
+
 import vllm.envs as envs
 from vllm.config import (DecodingConfig, LoRAConfig, ModelConfig,
                          ParallelConfig, SchedulerConfig, VllmConfig)
