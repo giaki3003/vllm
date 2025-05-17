@@ -415,49 +415,40 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         # ======= WORKER_BASE EXECUTE_MODEL DEBUG START (PID: {os.getpid()}) =======
         current_pid_wb_exec = os.getpid()
-        # Target worker rank 1. Adjust PID if necessary, or use rank if available.
-        # is_target_worker_rank1_wb = (hasattr(self, 'rank') and self.rank == 1)
-        is_target_worker_rank1_wb = (current_pid_wb_exec == 10099 or current_pid_wb_exec == 11282 or current_pid_wb_exec == 12582 or current_pid_wb_exec == 8712) # Use known PIDs for rank 1
 
         log_prefix_wb = f"[WB_EXEC_MODEL pid={current_pid_wb_exec} rank={getattr(self, 'rank', 'N/A')} pp_stage={getattr(self, 'pipeline_stage_rank', 'N/A')}]"
         
         kv_caches_for_runner = None
         effective_virtual_engine_idx = worker_input.virtual_engine
 
-        if is_target_worker_rank1_wb:
-            logger.error(f"{log_prefix_wb} Preparing kv_caches for ModelRunner.")
-            logger.error(f"{log_prefix_wb}   self.kv_cache is None? {self.kv_cache is None}")
-            if self.kv_cache is not None:
-                logger.error(f"{log_prefix_wb}   len(self.kv_cache) (List[Optional[List[Tensor]]]): {len(self.kv_cache)}")
-                logger.error(f"{log_prefix_wb}   worker_input.virtual_engine (index): {effective_virtual_engine_idx}")
-                if effective_virtual_engine_idx < len(self.kv_cache):
-                    kv_caches_for_runner = self.kv_cache[effective_virtual_engine_idx]
-                    logger.error(f"{log_prefix_wb}   kv_caches_for_runner (self.kv_cache[ve_idx]) type: {type(kv_caches_for_runner)}")
-                    if kv_caches_for_runner is None:
-                        logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is None.")
-                    elif isinstance(kv_caches_for_runner, list):
-                        logger.error(f"{log_prefix_wb}   len(kv_caches_for_runner) (List[Tensor]): {len(kv_caches_for_runner)}")
-                        if not kv_caches_for_runner:
-                             logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is an EMPTY LIST.")
-                        elif kv_caches_for_runner[0] is not None:
-                             logger.error(f"{log_prefix_wb}   kv_caches_for_runner[0] - Shape: {kv_caches_for_runner[0].shape}, Numel: {kv_caches_for_runner[0].numel()}, Dtype: {kv_caches_for_runner[0].dtype}")
-                             if kv_caches_for_runner[0].numel() == 0:
-                                 logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] has Numel == 0.")
-                        else:
-                             logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] is None.")
-                    else:
-                        logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is not a list or None, but type: {type(kv_caches_for_runner)}.")
-                else:
-                    logger.error(f"{log_prefix_wb}   CRITICAL: worker_input.virtual_engine index {effective_virtual_engine_idx} is out of bounds for self.kv_cache (len {len(self.kv_cache)}). kv_caches_for_runner will be None.")
-                    kv_caches_for_runner = None # Explicitly None if out of bounds
-            else: # self.kv_cache itself is None
-                 logger.error(f"{log_prefix_wb}   CRITICAL: self.kv_cache is None. kv_caches_for_runner will be None.")
-                 kv_caches_for_runner = None
-        else: # Not the target worker, just get the value
-            if self.kv_cache is not None and effective_virtual_engine_idx < len(self.kv_cache):
+        logger.error(f"{log_prefix_wb} Preparing kv_caches for ModelRunner.")
+        logger.error(f"{log_prefix_wb}   self.kv_cache is None? {self.kv_cache is None}")
+        if self.kv_cache is not None:
+            logger.error(f"{log_prefix_wb}   len(self.kv_cache) (List[Optional[List[Tensor]]]): {len(self.kv_cache)}")
+            logger.error(f"{log_prefix_wb}   worker_input.virtual_engine (index): {effective_virtual_engine_idx}")
+            if effective_virtual_engine_idx < len(self.kv_cache):
                 kv_caches_for_runner = self.kv_cache[effective_virtual_engine_idx]
+                logger.error(f"{log_prefix_wb}   kv_caches_for_runner (self.kv_cache[ve_idx]) type: {type(kv_caches_for_runner)}")
+                if kv_caches_for_runner is None:
+                    logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is None.")
+                elif isinstance(kv_caches_for_runner, list):
+                    logger.error(f"{log_prefix_wb}   len(kv_caches_for_runner) (List[Tensor]): {len(kv_caches_for_runner)}")
+                    if not kv_caches_for_runner:
+                         logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is an EMPTY LIST.")
+                    elif kv_caches_for_runner[0] is not None:
+                         logger.error(f"{log_prefix_wb}   kv_caches_for_runner[0] - Shape: {kv_caches_for_runner[0].shape}, Numel: {kv_caches_for_runner[0].numel()}, Dtype: {kv_caches_for_runner[0].dtype}")
+                         if kv_caches_for_runner[0].numel() == 0:
+                             logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] has Numel == 0.")
+                    else:
+                         logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] is None.")
+                else:
+                    logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is not a list or None, but type: {type(kv_caches_for_runner)}.")
             else:
-                kv_caches_for_runner = None
+                logger.error(f"{log_prefix_wb}   CRITICAL: worker_input.virtual_engine index {effective_virtual_engine_idx} is out of bounds for self.kv_cache (len {len(self.kv_cache)}). kv_caches_for_runner will be None.")
+                kv_caches_for_runner = None # Explicitly None if out of bounds
+        else: # self.kv_cache itself is None
+             logger.error(f"{log_prefix_wb}   CRITICAL: self.kv_cache is None. kv_caches_for_runner will be None.")
+             kv_caches_for_runner = None
         # ======= WORKER_BASE EXECUTE_MODEL DEBUG END =======
 
         output = self.model_runner.execute_model(
