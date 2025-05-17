@@ -265,13 +265,11 @@ class RayDistributedExecutor(DistributedExecutorBase):
                           f"Expected {self.parallel_config.world_size}, got {len(worker_metadata)}. Aborting.")
              raise RuntimeError("Failed to create all required Ray workers.")
 
-        logger.info("[DEBUG RAY INIT] Attempting to get IPs from created Ray workers...")
         try:
             worker_ips = ray.get([
                 each.worker.get_node_ip.remote() # type: ignore[attr-defined]
                 for each in worker_metadata
             ], timeout=60.0)
-            logger.info(f"[DEBUG RAY INIT] Worker IPs reported by Ray actors: {worker_ips}")
         except Exception as e:
             logger.error(f"[DEBUG RAY INIT] Failed to get IPs from Ray workers: {e}")
             logger.error(traceback.format_exc())
@@ -285,33 +283,27 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
         # --- FIX for ip_counts NameError ---
         # Calculate ip_counts based on the reported IPs in worker_metadata
-        logger.info("[DEBUG RAY INIT] Calculating ip_counts for sorting...")
         valid_ips = [md.ip for md in worker_metadata if md.ip and md.ip != "IP_QUERY_FAILED"]
         # Also consider the driver_ip itself if it's not None/dummy
         if driver_ip != "?.?.?.?":
              valid_ips.append(driver_ip) # Add driver ip to the list for counting consistency
         ip_counts = Counter(valid_ips)
-        logger.info(f"[DEBUG RAY INIT] Calculated ip_counts: {ip_counts}")
         # --- END ip_counts FIX ---
 
         # === MODIFIED LOGIC FOR FINDING DRIVER DUMMY WORKER ===
         if not self.use_ray_spmd_worker:
-            logger.info("[DEBUG RAY INIT] Identifying driver dummy worker by assuming rank 0 (non-SPMD mode)...")
             driver_dummy_worker_found_by_rank = False
             driver_worker_index = -1
             target_driver_rank = 0
 
             for i, md in enumerate(worker_metadata):
-                logger.debug(f"[DEBUG RAY INIT] Checking metadata index {i} for rank {target_driver_rank}. Metadata rank: {md.created_rank}")
                 if md.created_rank == target_driver_rank:
-                    logger.info(f"[DEBUG RAY INIT] Found potential driver dummy worker by rank: worker metadata entry {i} (rank {md.created_rank}), Reported Actor IP={md.ip}")
                     self.driver_dummy_worker = md.worker
                     # Assuming RayWorkerWrapper import is correct
                     self.driver_worker = RayWorkerWrapper(
                         vllm_config=self.vllm_config, rpc_rank=target_driver_rank)
                     driver_worker_index = i
                     driver_dummy_worker_found_by_rank = True
-                    logger.info(f"[DEBUG RAY INIT] Assigned worker {i} (rank {target_driver_rank}) as driver_dummy_worker based on rank.")
                     break
 
             if driver_worker_index != -1:
