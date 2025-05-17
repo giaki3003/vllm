@@ -269,6 +269,10 @@ class _AsyncLLMEngine(LLMEngine):
     async def step_async(
         self, virtual_engine: int
     ) -> List[Union[RequestOutput, PoolingRequestOutput]]:
+        logger.error(
+            f"[LLM_ENGINE_STEP_ENTRY pid={os.getpid()}] "
+            f"Method called with virtual_engine argument: {virtual_engine}"
+        )
         """Performs one decoding iteration and returns newly generated results.
         The workers are ran asynchronously if possible.
 
@@ -348,9 +352,22 @@ class _AsyncLLMEngine(LLMEngine):
                 # to each of the non-last PP stages for in-place prepare_input.
                 last_sampled_token_ids=last_sampled_token_ids)
 
+            logger.error(
+                f"[LLM_ENGINE_REQ_CREATED pid={os.getpid()}] "
+                f"For input virtual_engine={virtual_engine}: " # Log the method parameter again for context
+                f"CREATED ExecuteModelRequest with req.virtual_engine field: {execute_model_req.virtual_engine}"
+            )
+
             if allow_async_output_proc:
                 execute_model_req.async_callback = self.async_callbacks[
                     virtual_engine]
+
+            logger.error(
+                f"[LLM_ENGINE_TO_EXECUTOR pid={os.getpid()}] "
+                f"For input virtual_engine={virtual_engine}: " # Method parameter
+                f"Calling model_executor.execute_model_async with ExecuteModelRequest "
+                f"whose req.virtual_engine field is: {execute_model_req.virtual_engine}"
+            )
 
             # Execute the model.
             outputs = await self.model_executor.execute_model_async(
