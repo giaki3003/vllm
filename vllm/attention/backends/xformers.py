@@ -488,116 +488,137 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # This replaces your previous log at line 489 to provide more context
         # and ensure it always runs at the very start.
         attn_type = self.attn_type
+
+        # Store original 2D query shape for the final output.view()
+        # The 'output_tensor' will be created based on this.
+        original_query_2d_tensor_for_output_shape = query 
         
+        # ----------- CRITICAL RESHAPE TO 3D HAPPENS HERE -----------
+        # Reshape query, key, value to 3D per-head format immediately
+        # query becomes [total_tokens, num_heads, head_size]
+        query = query.view(-1, self.num_heads, self.head_size)
+        if key is not None:
+            assert value is not None, "Value must be provided if Key is provided"
+            # key becomes [total_tokens, num_kv_heads, head_size]
+            key = key.view(-1, self.num_kv_heads, self.head_size)
+            # value becomes [total_tokens, num_kv_heads, head_size]
+            value = value.view(-1, self.num_kv_heads, self.head_size)
+        else:
+            assert value is None, "Value must be None if Key is None"
+        # -----------------------------------------------------------
+
+        # ======= Universal Entry Log (operates on 3D tensors now) =======
         _is_prefill = attn_metadata.num_prefills > 0
-        _block_tables_numel = attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else -1 # Use -1 if None
+        _block_tables_numel = attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else -1
         _kv_cache_numel = kv_cache.numel() if kv_cache is not None else -1
+        _kv_cache_shape_str = str(kv_cache.shape) if kv_cache is not None and hasattr(kv_cache, 'shape') else 'N/A'
 
         logger.error(
-            f"[XF_FWD_ENTRY] worker_pid_INDICATOR={os.getpid()}, attn_type: {attn_type}, " # Added PID
-            f"kv_cache.numel: {_kv_cache_numel}, kv_cache_shape: {kv_cache.shape if kv_cache is not None and hasattr(kv_cache, 'shape') else 'N/A'}, "
+            f"[XF_FWD_ENTRY] worker_pid_INDICATOR={os.getpid()}, attn_type: {attn_type}, "
+            f"kv_cache.numel: {_kv_cache_numel}, kv_cache_shape: {_kv_cache_shape_str}, "
             f"is_prefill: {_is_prefill}, "
             f"num_prefill_tok: {attn_metadata.num_prefill_tokens}, "
-            f"block_tables.numel: {_block_tables_numel}"
+            f"block_tables.numel: {_block_tables_numel}. "
+            f"Query shape (now 3D): {query.shape}, Key shape (now 3D): {key.shape if key is not None else 'None'}"
         )
         # ======= End Universal Entry Log =======
 
-        # Tentative definition site for key_cache and value_cache
-        # We will explicitly track if they are defined
-        key_cache_defined_in_scope = False 
+        key_cache_defined_in_scope = False
+        # These will hold the actual K/V cache *views* if defined by split_kv_cache
+        defined_key_cache_view: Optional[torch.Tensor] = None 
+        defined_value_cache_view: Optional[torch.Tensor] = None
 
         if (attn_type != AttentionType.ENCODER and kv_cache is not None and kv_cache.numel() > 0):
-            logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] Trying to split kv_cache. Shape: {kv_cache.shape}")
+            logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] Trying to split kv_cache. Shape: {kv_cache.shape if kv_cache is not None else 'None'}")
             try:
-                # Define key_cache and value_cache here
-                key_cache_local, value_cache_local = PagedAttention.split_kv_cache(
+                defined_key_cache_view, defined_value_cache_view = PagedAttention.split_kv_cache(
                     kv_cache, self.num_kv_heads, self.head_size)
-                
-                # Assign to scope variables that are checked later
-                key_cache = key_cache_local
-                value_cache = value_cache_local
                 key_cache_defined_in_scope = True
-                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] split_kv_cache SUCCESS. key_cache defined: True. Shape: {key_cache.shape}")
+                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] split_kv_cache SUCCESS. key_cache_view defined: True. Shape: {defined_key_cache_view.shape if defined_key_cache_view is not None else 'None'}")
             except Exception as e_split:
                 logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] PagedAttention.split_kv_cache FAILED: {e_split}", exc_info=True)
-                # If split fails, key_cache remains undefined or error propagates
-                # Forcing a clear state:
                 key_cache_defined_in_scope = False 
-                # Depending on the error, execution might stop here or key_cache might be truly unbound
-
-            if key_cache_defined_in_scope and (key is not None) and (value is not None):
+                raise RuntimeError(f"Failed during PagedAttention.split_kv_cache for worker {os.getpid()}, see logs above.") from e_split
+            
+            if key_cache_defined_in_scope and (key is not None) and (value is not None): # 'key' and 'value' here are the 3D reshaped inputs
                 logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] Attempting PagedAttention.write_to_paged_cache.")
-                # ... (rest of the write_to_paged_cache logic) ...
+                if attn_type == AttentionType.ENCODER_DECODER:
+                    updated_slot_mapping = attn_metadata.cross_slot_mapping
+                else: 
+                    updated_slot_mapping = attn_metadata.slot_mapping
+                
                 PagedAttention.write_to_paged_cache(
-                    key, value, key_cache, value_cache, updated_slot_mapping, # Uses defined key_cache
+                    key, value, defined_key_cache_view, defined_value_cache_view, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
                 logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] PagedAttention.write_to_paged_cache successful.")
-
-        else: # Condition for splitting kv_cache was false
+        else:
             logger.error(
                 f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] SKIPPED PagedAttention.split_kv_cache. "
                 f"Reason: attn_type={attn_type} (is ENCODER? {attn_type == AttentionType.ENCODER}), "
                 f"kv_cache_valid_for_split={(kv_cache is not None and kv_cache.numel() > 0)}"
             )
-            # key_cache and value_cache remain undefined in this local scope if this path is taken
-
+        
         (num_prefill_query_tokens, num_prefill_kv_tokens,
          num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
-        output_tensor = torch.empty_like(query) # Changed variable name from 'output' to 'output_tensor' to avoid conflict with function arg 'output'
-        # Query for decode. KV is not needed because it is already cached.
-        decode_query = query[num_prefill_query_tokens:]
-        # QKV for prefill.
-        query_prefill = query[:num_prefill_query_tokens] # Renamed to avoid confusion
-        key_prefill = None
-        value_prefill = None
-        if key is not None and value is not None:
-            key_prefill = key[:num_prefill_kv_tokens]
-            value_prefill = value[:num_prefill_kv_tokens]
+        # Create output tensor based on the original 2D query's shape
+        output_tensor = torch.empty_like(original_query_2d_tensor_for_output_shape)
+        
+        # Slices are now from the 3D reshaped query, key, value tensors
+        decode_query_3d_slice = query[num_prefill_query_tokens:] 
+        query_prefill_3d_slice = query[:num_prefill_query_tokens]
+        
+        key_prefill_3d_slice = None
+        value_prefill_3d_slice = None
+        if key is not None and value is not None: # key and value are already 3D here
+            key_prefill_3d_slice = key[:num_prefill_kv_tokens]
+            value_prefill_3d_slice = value[:num_prefill_kv_tokens]
 
-        assert query_prefill.shape[0] == num_prefill_query_tokens
-        assert decode_query.shape[0] == num_decode_query_tokens
+        assert query_prefill_3d_slice.shape[0] == num_prefill_query_tokens, \
+            f"query_prefill_3d_slice shape0: {query_prefill_3d_slice.shape[0]} vs num_prefill_query_tokens: {num_prefill_query_tokens}"
+        assert decode_query_3d_slice.shape[0] == num_decode_query_tokens, \
+            f"decode_query_3d_slice shape0: {decode_query_3d_slice.shape[0]} vs num_decode_query_tokens: {num_decode_query_tokens}"
+
 
         if prefill_meta := attn_metadata.prefill_metadata:
-            # Prompt run.
             if (_kv_cache_numel == 0 or _block_tables_numel == 0): # Path A
-                logger.error(f"[XF_FWD_PREFILL_PATH_A os.getpid()={os.getpid()}] Taking 'normal attention' path (memory_efficient_xformers_forward).")
+                logger.error(f"[XF_FWD_PREFILL_PATH_A os.getpid()={os.getpid()}] Taking 'normal attention' path. Query shape to _run_mem_eff: {query_prefill_3d_slice.shape if query_prefill_3d_slice is not None else 'None'}")
+                # _run_memory_efficient_xformers_forward expects 3D inputs for query, key, value
                 out = self._run_memory_efficient_xformers_forward(
-                    query_prefill, key_prefill, value_prefill, prefill_meta, attn_type=attn_type)
-                assert out.shape == output_tensor[:num_prefill_query_tokens].shape
-                output_tensor[:num_prefill_query_tokens] = out
+                    query_prefill_3d_slice, key_prefill_3d_slice, value_prefill_3d_slice, prefill_meta, attn_type=attn_type)
+                
+                # Output 'out' from _run_memory_efficient_xformers_forward is 3D [num_prefill_tokens, num_heads, head_size]
+                # We need to assign it to a view of output_tensor that matches this.
+                # output_tensor is 2D [total_tokens, num_heads * head_size]
+                # query (3D) is [total_tokens, num_heads, head_size]
+                # So, view output_tensor like the 3D query, slice, then assign.
+                output_view_for_assignment = output_tensor.view(-1, self.num_heads, self.head_size)
+                assert out.shape == output_view_for_assignment[:num_prefill_query_tokens].shape
+                output_view_for_assignment[:num_prefill_query_tokens] = out
             else: # Path B (prefix-enabled attention)
                 logger.error(
                     f"[XF_FWD_PREFILL_PATH_B os.getpid()={os.getpid()}] Taking 'prefix attention' path (PagedAttention.forward_prefix). "
-                    f"key_cache defined in scope? {key_cache_defined_in_scope}"
+                    f"key_cache_defined_in_scope? {key_cache_defined_in_scope}"
                 )
                 if not key_cache_defined_in_scope:
                     logger.critical(
-                        f"[XF_FWD_PREFILL_PATH_B_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering prefix path but key_cache was NOT defined by split_kv_cache! This will cause UnboundLocalError."
+                        f"[XF_FWD_PREFILL_PATH_B_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering prefix path but defined_key_cache_view was NOT set by split_kv_cache! This will cause UnboundLocalError."
                         f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}, block_tables.numel={_block_tables_numel}"
                     )
-                    # This is the problematic scenario. For safety, we could raise here to prevent the UnboundLocalError
-                    # raise RuntimeError("key_cache not defined before PagedAttention.forward_prefix due to logic error or unexpected state.")
+                    raise UnboundLocalError(f"PID {os.getpid()}: defined_key_cache_view is about to be used in PagedAttention.forward_prefix but was not defined by split_kv_cache earlier.")
                 
                 assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have prefix attention.")
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
                 
-                # Ensure key_cache and value_cache are passed only if defined (though if not defined, error occurs)
-                current_key_cache = key_cache if key_cache_defined_in_scope else None # This won't fix UnboundLocalError if it's used directly
-                current_value_cache = value_cache if key_cache_defined_in_scope else None # but good for PagedAttention if it handles None
-
-                if not key_cache_defined_in_scope: # Actually stop if it's not defined
-                    raise UnboundLocalError("Manually raising: key_cache is about to be used in PagedAttention.forward_prefix but was not defined.")
-
                 out = PagedAttention.forward_prefix(
-                    query_prefill,
-                    key_prefill,
-                    value_prefill,
+                    query_prefill_3d_slice,
+                    key_prefill_3d_slice,
+                    value_prefill_3d_slice,
                     self.kv_cache_dtype,
-                    key_cache,  # Line 609/620 - where UnboundLocalError occurs
-                    value_cache,
+                    defined_key_cache_view, # Use the correctly scoped and named variable
+                    defined_value_cache_view, # Use the correctly scoped and named variable
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
@@ -607,28 +628,30 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                assert output_tensor[:num_prefill_query_tokens].shape == out.shape
-                output_tensor[:num_prefill_query_tokens] = out
+                output_view_for_assignment = output_tensor.view(-1, self.num_heads, self.head_size)
+                assert out.shape == output_view_for_assignment[:num_prefill_query_tokens].shape
+                output_view_for_assignment[:num_prefill_query_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
             logger.error(
                 f"[XF_FWD_DECODE_PATH os.getpid()={os.getpid()}] Taking 'decode' path (PagedAttention.forward_decode). "
-                f"key_cache defined in scope? {key_cache_defined_in_scope}"
+                f"key_cache_defined_in_scope? {key_cache_defined_in_scope}"
             )
             if not key_cache_defined_in_scope:
                 logger.critical(
-                    f"[XF_FWD_DECODE_PATH_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering decode path but key_cache was NOT defined by split_kv_cache! This will cause UnboundLocalError."
-                     f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}, block_tables.numel={_block_tables_numel}" # block_tables might not be relevant for decode check
+                    f"[XF_FWD_DECODE_PATH_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering decode path but defined_key_cache_view was NOT set by split_kv_cache! This will cause UnboundLocalError."
+                     f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}"
                 )
-                raise UnboundLocalError("Manually raising: key_cache is about to be used in PagedAttention.forward_decode but was not defined.")
+                raise UnboundLocalError(f"PID {os.getpid()}: defined_key_cache_view is about to be used in PagedAttention.forward_decode but was not defined by split_kv_cache earlier.")
 
             assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have decode metadata.")
             (seq_lens_arg, max_seq_len_arg, block_tables_arg) = get_seq_len_block_table_args(decode_meta, False, attn_type)
 
-            output_tensor[num_prefill_query_tokens:] = PagedAttention.forward_decode(
-                decode_query,
-                key_cache, # Uses key_cache
-                value_cache, # Uses value_cache
+            # decode_query_3d_slice is already 3D
+            decode_out = PagedAttention.forward_decode(
+                decode_query_3d_slice, 
+                defined_key_cache_view, # Use the correctly scoped and named variable
+                defined_value_cache_view, # Use the correctly scoped and named variable
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
@@ -639,9 +662,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 layer._k_scale,
                 layer._v_scale,
             )
+            output_view_for_assignment = output_tensor.view(-1, self.num_heads, self.head_size)
+            assert decode_out.shape == output_view_for_assignment[num_prefill_query_tokens:].shape
+            output_view_for_assignment[num_prefill_query_tokens:] = decode_out
 
-        # Reshape the output tensor.
-        return output_tensor.view(-1, self.num_heads * self.head_size)
+        return output_tensor # Return the 2D tensor as expected by caller
 
     def _run_memory_efficient_xformers_forward(
         self,
@@ -669,13 +694,46 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                        which is the vLLM default generally
         """
 
+        # ======= DEBUG LOGS FOR RESHAPE ISSUE - START =======
+        logger.error(
+            f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] Entry _run_memory_efficient_xformers_forward. "
+            f"Input query.shape: {query.shape if query is not None else 'None'}, "
+            f"Input query.dtype: {query.dtype if query is not None else 'None'}, "
+            f"Input query.device: {query.device if query is not None else 'None'}, "
+            f"self.num_heads: {self.num_heads}, self.head_size (from init): {self.head_size}, "
+            f"self.num_kv_heads: {self.num_kv_heads}, self.num_queries_per_kv: {self.num_queries_per_kv}"
+        )
+        if query is not None:
+            logger.error(f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] query.numel(): {query.numel()}")
+        # ======= DEBUG LOGS FOR RESHAPE ISSUE - END =======
+
         original_query = query
-        if self.num_kv_heads != self.num_heads:
-            # GQA/MQA requires the shape [B, M, G, H, K].
-            # Note that the output also has the same shape (which is different
-            # from a spec from the doc).
-            query = query.view(query.shape[0], self.num_kv_heads,
-                               self.num_queries_per_kv, query.shape[-1])
+        if self.num_kv_heads != self.num_heads:  # Condition for GQA/MQA
+            # Log arguments before the view operation
+            _query_shape_0 = query.shape[0]
+            _query_shape_last = query.shape[-1] # This should be self.head_size
+            
+            target_view_shape_tuple = (
+                _query_shape_0,
+                self.num_kv_heads,
+                self.num_queries_per_kv,
+                _query_shape_last 
+            )
+            
+            logger.error(
+                f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] About to call query.view(). "
+                f"Actual query.shape: {query.shape}. "
+                f"Calculated query.shape[0]: {_query_shape_0}, "
+                f"self.num_kv_heads: {self.num_kv_heads}, "
+                f"self.num_queries_per_kv: {self.num_queries_per_kv}, "
+                f"Calculated query.shape[-1]: {_query_shape_last}. "
+                f"Intended target_view_shape: {target_view_shape_tuple}"
+            )
+
+            # This is line 677 where the error occurs:
+            query = query.view(*target_view_shape_tuple) 
+            
+            # key and value reshaping would follow if query reshape succeeded
             key = key[:, :,
                       None, :].expand(key.shape[0], self.num_kv_heads,
                                       self.num_queries_per_kv, key.shape[-1])
