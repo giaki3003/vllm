@@ -456,8 +456,8 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         output = self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=kv_caches_for_runner,
-            if self.kv_cache is not None else None,
+            kv_caches=kv_caches_for_runner
+            if kv_caches_for_runner is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
             **kwargs,
