@@ -402,20 +402,20 @@ def unified_attention(
     kv_cache_for_impl = None # Initialize
 
     if not hasattr(self_module, 'kv_cache') or self_module.kv_cache is None:
-        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache attribute is missing or None.")
+        logger.error(f"CRITICAL: self_module.kv_cache attribute is missing or None.")
     elif not isinstance(self_module.kv_cache, list):
-        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache is not a list (type: {type(self_module.kv_cache)}). Expected list due to bind_single_layer_kv_cache logic.")
+        logger.error(f"CRITICAL: self_module.kv_cache is not a list (type: {type(self_module.kv_cache)}). Expected list due to bind_single_layer_kv_cache logic.")
     elif len(self_module.kv_cache) != pipeline_world_size and pipeline_world_size > 0 : # Check if list length matches PP size if PP is active
-        logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache list length ({len(self_module.kv_cache)}) "
+        logger.error(f"CRITICAL: self_module.kv_cache list length ({len(self_module.kv_cache)}) "
                        f"mismatches pipeline_world_size ({pipeline_world_size}).")
     elif actual_worker_pp_rank >= len(self_module.kv_cache):
-        logger.error(f"{log_prefix_ua} CRITICAL: actual_worker_pp_rank ({actual_worker_pp_rank}) "
+        logger.error(f"CRITICAL: actual_worker_pp_rank ({actual_worker_pp_rank}) "
                        f"is out of bounds for self_module.kv_cache (len: {len(self_module.kv_cache)}).")
     else:
         # *** THE KEY CHANGE: Use actual_worker_pp_rank for indexing ***
         kv_cache_for_impl = self_module.kv_cache[actual_worker_pp_rank]
         if kv_cache_for_impl is None:
-            logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache[{actual_worker_pp_rank}] (using actual rank) is None! "
+            logger.error(f"CRITICAL: self_module.kv_cache[{actual_worker_pp_rank}] (using actual rank) is None! "
                            f"This implies bind_single_layer_kv_cache failed to set it for this worker's stage.")
 
     # Call the attention backend implementation (e.g., XFormersImpl.forward)
