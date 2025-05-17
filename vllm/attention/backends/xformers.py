@@ -512,15 +512,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         _block_tables_numel = attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else -1
         _kv_cache_numel = kv_cache.numel() if kv_cache is not None else -1
         _kv_cache_shape_str = str(kv_cache.shape) if kv_cache is not None and hasattr(kv_cache, 'shape') else 'N/A'
-
-        logger.error(
-            f"[XF_FWD_ENTRY] worker_pid_INDICATOR={os.getpid()}, attn_type: {attn_type}, "
-            f"kv_cache.numel: {_kv_cache_numel}, kv_cache_shape: {_kv_cache_shape_str}, "
-            f"is_prefill: {_is_prefill}, "
-            f"num_prefill_tok: {attn_metadata.num_prefill_tokens}, "
-            f"block_tables.numel: {_block_tables_numel}. "
-            f"Query shape (now 3D): {query.shape}, Key shape (now 3D): {key.shape if key is not None else 'None'}"
-        )
         # ======= End Universal Entry Log =======
 
         key_cache_defined_in_scope = False
@@ -529,19 +520,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         defined_value_cache_view: Optional[torch.Tensor] = None
 
         if (attn_type != AttentionType.ENCODER and kv_cache is not None and kv_cache.numel() > 0):
-            logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] Trying to split kv_cache. Shape: {kv_cache.shape if kv_cache is not None else 'None'}")
             try:
                 defined_key_cache_view, defined_value_cache_view = PagedAttention.split_kv_cache(
                     kv_cache, self.num_kv_heads, self.head_size)
                 key_cache_defined_in_scope = True
-                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] split_kv_cache SUCCESS. key_cache_view defined: True. Shape: {defined_key_cache_view.shape if defined_key_cache_view is not None else 'None'}")
             except Exception as e_split:
-                logger.error(f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] PagedAttention.split_kv_cache FAILED: {e_split}", exc_info=True)
                 key_cache_defined_in_scope = False 
                 raise RuntimeError(f"Failed during PagedAttention.split_kv_cache for worker {os.getpid()}, see logs above.") from e_split
             
             if key_cache_defined_in_scope and (key is not None) and (value is not None): # 'key' and 'value' here are the 3D reshaped inputs
-                logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] Attempting PagedAttention.write_to_paged_cache.")
                 if attn_type == AttentionType.ENCODER_DECODER:
                     updated_slot_mapping = attn_metadata.cross_slot_mapping
                 else: 
@@ -550,7 +537,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 PagedAttention.write_to_paged_cache(
                     key, value, defined_key_cache_view, defined_value_cache_view, updated_slot_mapping,
                     self.kv_cache_dtype, layer._k_scale, layer._v_scale)
-                logger.error(f"[XF_FWD_WRITE_LOG os.getpid()={os.getpid()}] PagedAttention.write_to_paged_cache successful.")
         else:
             logger.error(
                 f"[XF_FWD_SPLIT_LOG os.getpid()={os.getpid()}] SKIPPED PagedAttention.split_kv_cache. "
@@ -583,7 +569,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             if (_kv_cache_numel == 0 or _block_tables_numel == 0): # Path A
-                logger.error(f"[XF_FWD_PREFILL_PATH_A os.getpid()={os.getpid()}] Taking 'normal attention' path. Query shape to _run_mem_eff: {query_prefill_3d_slice.shape if query_prefill_3d_slice is not None else 'None'}")
                 # _run_memory_efficient_xformers_forward expects 3D inputs for query, key, value
                 out = self._run_memory_efficient_xformers_forward(
                     query_prefill_3d_slice, key_prefill_3d_slice, value_prefill_3d_slice, prefill_meta, attn_type=attn_type)
@@ -597,15 +582,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert out.shape == output_view_for_assignment[:num_prefill_query_tokens].shape
                 output_view_for_assignment[:num_prefill_query_tokens] = out
             else: # Path B (prefix-enabled attention)
-                logger.error(
-                    f"[XF_FWD_PREFILL_PATH_B os.getpid()={os.getpid()}] Taking 'prefix attention' path (PagedAttention.forward_prefix). "
-                    f"key_cache_defined_in_scope? {key_cache_defined_in_scope}"
-                )
                 if not key_cache_defined_in_scope:
-                    logger.critical(
-                        f"[XF_FWD_PREFILL_PATH_B_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering prefix path but defined_key_cache_view was NOT set by split_kv_cache! This will cause UnboundLocalError."
-                        f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}, block_tables.numel={_block_tables_numel}"
-                    )
                     raise UnboundLocalError(f"PID {os.getpid()}: defined_key_cache_view is about to be used in PagedAttention.forward_prefix but was not defined by split_kv_cache earlier.")
                 
                 assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have prefix attention.")
@@ -633,15 +610,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 output_view_for_assignment[:num_prefill_query_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
-            logger.error(
-                f"[XF_FWD_DECODE_PATH os.getpid()={os.getpid()}] Taking 'decode' path (PagedAttention.forward_decode). "
-                f"key_cache_defined_in_scope? {key_cache_defined_in_scope}"
-            )
             if not key_cache_defined_in_scope:
-                logger.critical(
-                    f"[XF_FWD_DECODE_PATH_ERROR os.getpid()={os.getpid()}] CRITICAL: Entering decode path but defined_key_cache_view was NOT set by split_kv_cache! This will cause UnboundLocalError."
-                     f" State: attn_type={attn_type}, kv_cache.numel={_kv_cache_numel}"
-                )
                 raise UnboundLocalError(f"PID {os.getpid()}: defined_key_cache_view is about to be used in PagedAttention.forward_decode but was not defined by split_kv_cache earlier.")
 
             assert attn_type != AttentionType.ENCODER_ONLY, ("Encoder-only models should not have decode metadata.")
@@ -693,20 +662,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                        attention. Defaults to decoder self-attention,
                        which is the vLLM default generally
         """
-
-        # ======= DEBUG LOGS FOR RESHAPE ISSUE - START =======
-        logger.error(
-            f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] Entry _run_memory_efficient_xformers_forward. "
-            f"Input query.shape: {query.shape if query is not None else 'None'}, "
-            f"Input query.dtype: {query.dtype if query is not None else 'None'}, "
-            f"Input query.device: {query.device if query is not None else 'None'}, "
-            f"self.num_heads: {self.num_heads}, self.head_size (from init): {self.head_size}, "
-            f"self.num_kv_heads: {self.num_kv_heads}, self.num_queries_per_kv: {self.num_queries_per_kv}"
-        )
-        if query is not None:
-            logger.error(f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] query.numel(): {query.numel()}")
-        # ======= DEBUG LOGS FOR RESHAPE ISSUE - END =======
-
         original_query = query
         if self.num_kv_heads != self.num_heads:  # Condition for GQA/MQA
             # Log arguments before the view operation
@@ -718,16 +673,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.num_kv_heads,
                 self.num_queries_per_kv,
                 _query_shape_last 
-            )
-            
-            logger.error(
-                f"[XF_MEM_EFF_DEBUG pid={os.getpid()}] About to call query.view(). "
-                f"Actual query.shape: {query.shape}. "
-                f"Calculated query.shape[0]: {_query_shape_0}, "
-                f"self.num_kv_heads: {self.num_kv_heads}, "
-                f"self.num_queries_per_kv: {self.num_queries_per_kv}, "
-                f"Calculated query.shape[-1]: {_query_shape_last}. "
-                f"Intended target_view_shape: {target_view_shape_tuple}"
             )
 
             # This is line 677 where the error occurs:
