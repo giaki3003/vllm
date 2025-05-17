@@ -203,8 +203,6 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     # Use current_platform.ray_device_key which should be "GPU" for CUDA
                     if bundle.get(current_platform.ray_device_key, 0):
                         bundle_indices.append(bundle_id)
-
-                if len(bundle_indices) < self.parallel_config.world_size:
                 bundle_indices = bundle_indices[:self.parallel_config.world_size]
             else:
                 bundle_indices = []
