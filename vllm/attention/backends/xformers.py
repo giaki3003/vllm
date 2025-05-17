@@ -487,6 +487,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # ======= Universal Entry Log for each call to forward() =======
         # This replaces your previous log at line 489 to provide more context
         # and ensure it always runs at the very start.
+        attn_type = self.attn_type
+        
         _is_prefill = attn_metadata.num_prefills > 0
         _block_tables_numel = attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else -1 # Use -1 if None
         _kv_cache_numel = kv_cache.numel() if kv_cache is not None else -1
