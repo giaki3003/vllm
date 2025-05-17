@@ -427,11 +427,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
             logger.error(f"{log_prefix_wb}   len(self.kv_cache) (List[Optional[List[Tensor]]]): {len(self.kv_cache)}")
             logger.error(f"{log_prefix_wb}   worker_input.virtual_engine (index): {effective_virtual_engine_idx}")
             if effective_virtual_engine_idx < len(self.kv_cache):
-                kv_caches_for_runner = self.kv_cache[self.pipeline_stage_rank] \
-                    if self.kv_cache is not None and \
-                       hasattr(self, 'pipeline_stage_rank') and self.pipeline_stage_rank is not None and \
-                       self.pipeline_stage_rank < len(self.kv_cache) \
-                    else None
+                kv_caches_for_runner = self.kv_cache[effective_virtual_engine_idx]
                 logger.error(f"{log_prefix_wb}   kv_caches_for_runner (self.kv_cache[ve_idx]) type: {type(kv_caches_for_runner)}")
                 if kv_caches_for_runner is None:
                     logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is None.")
