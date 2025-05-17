@@ -380,7 +380,6 @@ def unified_attention(
     forward_context: Optional[ForwardContext] = get_forward_context()
 
     if forward_context is None:
-        logger.critical(f"[UNIFIED_ATTN pid={current_pid} layer='{layer_name}'] ForwardContext is None! This is a critical error.")
         # Return an empty tensor or raise, an empty tensor will likely lead to downstream errors seen before
         return torch.empty_like(query) # Or raise an explicit error
 
@@ -399,8 +398,6 @@ def unified_attention(
             pipeline_world_size = pp_group.world_size
             if pipeline_world_size > 1 and hasattr(pp_group, 'rank_in_group'):
                 actual_worker_pp_rank = pp_group.rank_in_group
-    
-    log_prefix_ua = f"[UNIFIED_ATTN pid={current_pid} layer='{layer_name}' req_VE={request_virtual_engine} actual_pp_rank={actual_worker_pp_rank}]"
 
     kv_cache_for_impl = None # Initialize
 

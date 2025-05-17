@@ -158,18 +158,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
     def _init_workers_ray(self, placement_group: "PlacementGroup",
                           **ray_remote_kwargs):
-        logger.info("[DEBUG RAY INIT] Entering _init_workers_ray...")
-        logger.info(f"[DEBUG RAY INIT] Received placement_group type: {type(placement_group)}")
-        if placement_group:
-            logger.info(f"[DEBUG RAY INIT] Placement group ID: {placement_group.id}")
-            logger.info(f"[DEBUG RAY INIT] Placement group specs: {placement_group.bundle_specs}")
-        else:
-            logger.warning("[DEBUG RAY INIT] Received placement_group is None!")
-
-        logger.info(f"[DEBUG RAY INIT] Received ray_remote_kwargs: {ray_remote_kwargs}")
 
         num_gpus = envs.VLLM_RAY_PER_WORKER_GPUS
-        logger.info(f"[DEBUG RAY INIT] VLLM_RAY_PER_WORKER_GPUS: {num_gpus}")
 
         # The driver dummy worker does not actually use any resources.
         # It holds the resource for the driver worker.
@@ -183,17 +173,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
         self.pp_tp_workers: List[List[RayWorkerWrapper]] = []
 
         if self.parallel_config.ray_workers_use_nsight:
-            logger.info("[DEBUG RAY INIT] Configuring Ray workers for Nsight...")
             ray_remote_kwargs = self._configure_ray_workers_use_nsight(
                 ray_remote_kwargs)
-            logger.info(f"[DEBUG RAY INIT] Updated ray_remote_kwargs for Nsight: {ray_remote_kwargs}")
 
-        logger.info(f"[DEBUG RAY INIT] use_ray_spmd_worker flag: {self.use_ray_spmd_worker}")
 
         # Create the workers.
         bundle_indices: List[int]
         if envs.VLLM_RAY_BUNDLE_INDICES:
-            logger.info(f"[DEBUG RAY INIT] Using user-provided VLLM_RAY_BUNDLE_INDICES: {envs.VLLM_RAY_BUNDLE_INDICES}")
             # Use the bundle indices specified by the user.
             try:
                 bundle_indices = list(
@@ -210,40 +196,27 @@ class RayDistributedExecutor(DistributedExecutorBase):
                 logger.error(f"[DEBUG RAY INIT] Failed to parse VLLM_RAY_BUNDLE_INDICES: {e}")
                 raise
         else:
-            logger.info("[DEBUG RAY INIT] VLLM_RAY_BUNDLE_INDICES not set, deriving indices from placement group...")
             # use the first N bundles that have GPU resources.
             bundle_indices = []
             if placement_group and placement_group.bundle_specs:
                 for bundle_id, bundle in enumerate(placement_group.bundle_specs):
-                    logger.debug(f"[DEBUG RAY INIT] Checking bundle {bundle_id}: {bundle}")
                     # Use current_platform.ray_device_key which should be "GPU" for CUDA
                     if bundle.get(current_platform.ray_device_key, 0):
-                        logger.debug(f"[DEBUG RAY INIT] Bundle {bundle_id} has '{current_platform.ray_device_key}', adding to indices.")
                         bundle_indices.append(bundle_id)
-                    else:
-                         logger.debug(f"[DEBUG RAY INIT] Bundle {bundle_id} does not have '{current_platform.ray_device_key}'.")
 
-                logger.info(f"[DEBUG RAY INIT] Found {len(bundle_indices)} bundles with GPUs: {bundle_indices}")
                 if len(bundle_indices) < self.parallel_config.world_size:
-                    logger.warning(f"[DEBUG RAY INIT] Found fewer GPU bundles ({len(bundle_indices)}) "
-                                   f"than world size ({self.parallel_config.world_size})!")
                 bundle_indices = bundle_indices[:self.parallel_config.world_size]
-                logger.info(f"[DEBUG RAY INIT] Final bundle_indices to use (up to world size): {bundle_indices}")
             else:
-                logger.error("[DEBUG RAY INIT] Cannot derive bundle indices: Placement group is None or has no bundle_specs!")
                 bundle_indices = []
 
         worker_metadata: List[RayWorkerMetaData] = []
         try:
             # Assuming get_ip() is defined in ray_utils or globally accessible
             driver_ip = get_ip()
-            logger.info(f"[DEBUG RAY INIT] Driver IP detected by get_ip(): {driver_ip}")
         except Exception as e:
-            logger.error(f"[DEBUG RAY INIT] Failed to get driver IP using get_ip(): {e}")
             driver_ip = "?.?.?.?" # Assign a dummy value
 
         if 'bundle_indices' not in locals():
-            logger.error("[DEBUG RAY INIT] CRITICAL: bundle_indices was not defined before worker creation loop!")
             bundle_indices = []
 
         for rank, bundle_id in enumerate(bundle_indices):
@@ -254,11 +227,8 @@ class RayDistributedExecutor(DistributedExecutorBase):
                     placement_group_capture_child_tasks=True,
                     placement_group_bundle_index=bundle_id,
                 )
-                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}, bundle_id {bundle_id}: "
-                            f"Using scheduling strategy: {scheduling_strategy}")
 
                 device_key = current_platform.ray_device_key
-                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Checking device key: '{device_key}'")
 
                 remote_args = dict(
                     num_cpus=0,
@@ -268,17 +238,13 @@ class RayDistributedExecutor(DistributedExecutorBase):
 
                 if device_key == "GPU":
                     remote_args["num_gpus"] = num_gpus
-                    logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Configuring Ray actor with num_gpus={num_gpus}")
                 else:
                     remote_args["resources"] = {device_key: num_gpus}
-                    logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Configuring Ray actor with resources={{{device_key}: {num_gpus}}}")
 
-                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Calling ray.remote with args: {remote_args}")
                 # Assuming RayWorkerWrapper is imported correctly
                 worker = ray.remote(**remote_args)(RayWorkerWrapper).remote(
                     vllm_config=self.vllm_config, rpc_rank=rank
                 )
-                logger.info(f"[DEBUG RAY INIT] Loop rank {rank}: Ray actor created: {worker}")
 
             except Exception as e:
                 logger.error(f"[DEBUG RAY INIT] Loop rank {rank}: FAILED to create Ray actor!")
