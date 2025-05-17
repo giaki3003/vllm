@@ -417,22 +417,6 @@ def unified_attention(
         if kv_cache_for_impl is None:
             logger.error(f"{log_prefix_ua} CRITICAL: self_module.kv_cache[{actual_worker_pp_rank}] (using actual rank) is None! "
                            f"This implies bind_single_layer_kv_cache failed to set it for this worker's stage.")
-        
-    # Log the KV cache tensor that will be passed to the backend implementation
-    # This is similar to your existing logging block.
-    _is_prefill_log = attn_metadata.num_prefills > 0 if attn_metadata else "N/A (no attn_metadata)"
-    if kv_cache_for_impl is not None:
-        logger.error(
-            f"{log_prefix_ua} Passing to impl.forward: "
-            f"kv_cache.shape={kv_cache_for_impl.shape}, kv_cache.numel={kv_cache_for_impl.numel()}, "
-            f"dtype={kv_cache_for_impl.dtype}, is_prefill={_is_prefill_log}"
-        )
-        if kv_cache_for_impl.numel() == 0:
-             logger.error(f"{log_prefix_ua} WARNING: kv_cache_for_impl has numel=0 before passing to impl.forward.")
-    else:
-        logger.error(
-            f"{log_prefix_ua} Passing to impl.forward: kv_cache is None, is_prefill={_is_prefill_log}"
-        )
 
     # Call the attention backend implementation (e.g., XFormersImpl.forward)
     # 'self_module' is the AttentionOp instance, 'self_module.impl' is the backend
