@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Type
 
+import os
 import torch
 from xformers import ops as xops
 from xformers.ops.fmha.attn_bias import (AttentionBias,
