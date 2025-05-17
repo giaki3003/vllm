@@ -389,7 +389,7 @@ class LocalOrDistributedWorkerBase(WorkerBase):
     ) -> Optional[List[SamplerOutput]]:
         """Executes at least one model step on the given sequences, unless no
         sequences are provided."""
-        start_time = time.perf_counter() # Ensure time is imported: import time
+        start_time = time.perf_counter()
 
         inputs = self.prepare_input(execute_model_req)
         if inputs is None:
@@ -402,58 +402,62 @@ class LocalOrDistributedWorkerBase(WorkerBase):
 
         self.execute_worker(worker_input)
 
+        # If there is no input, we don't need to execute the model.
         if worker_input.num_seq_groups == 0:
             return []
 
         intermediate_tensors = None
         orig_model_execute_time = 0.0
-        # Ensure get_pp_group and get_tp_group are available (imported)
-        # from vllm.distributed import get_pp_group, get_tp_group 
         if not get_pp_group().is_first_rank:
-            # ... (existing recv logic) ...
-            pass # Placeholder for brevity
+            intermediate_tensors = IntermediateTensors(
+                get_pp_group().recv_tensor_dict(
+                    all_gather_group=get_tp_group()))
+            if (self.observability_config is not None
+                    and self.observability_config.collect_model_execute_time):
+                orig_model_execute_time = intermediate_tensors.tensors.get(
+                    "model_execute_time", torch.tensor(0)).item()
 
-        # ======= WORKER_BASE EXECUTE_MODEL DEBUG START (PID: {os.getpid()}) =======
-        current_pid_wb_exec = os.getpid()
-
-        log_prefix_wb = f"[WB_EXEC_MODEL pid={current_pid_wb_exec} rank={getattr(self, 'rank', 'N/A')} pp_stage={getattr(self, 'pipeline_stage_rank', 'N/A')}]"
-        
+        # --- Start of section to determine kv_caches_for_runner ---
         kv_caches_for_runner = None
-        effective_virtual_engine_idx = worker_input.virtual_engine
+        current_pid_wb = os.getpid() # For logging
 
-        logger.error(f"{log_prefix_wb} Preparing kv_caches for ModelRunner.")
-        logger.error(f"{log_prefix_wb}   self.kv_cache is None? {self.kv_cache is None}")
         if self.kv_cache is not None:
-            logger.error(f"{log_prefix_wb}   len(self.kv_cache) (List[Optional[List[Tensor]]]): {len(self.kv_cache)}")
-            logger.error(f"{log_prefix_wb}   worker_input.virtual_engine (index): {effective_virtual_engine_idx}")
-            if effective_virtual_engine_idx < len(self.kv_cache):
-                kv_caches_for_runner = self.kv_cache[effective_virtual_engine_idx]
-                logger.error(f"{log_prefix_wb}   kv_caches_for_runner (self.kv_cache[ve_idx]) type: {type(kv_caches_for_runner)}")
-                if kv_caches_for_runner is None:
-                    logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is None.")
-                elif isinstance(kv_caches_for_runner, list):
-                    logger.error(f"{log_prefix_wb}   len(kv_caches_for_runner) (List[Tensor]): {len(kv_caches_for_runner)}")
-                    if not kv_caches_for_runner:
-                         logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is an EMPTY LIST.")
-                    elif kv_caches_for_runner[0] is not None:
-                         logger.error(f"{log_prefix_wb}   kv_caches_for_runner[0] - Shape: {kv_caches_for_runner[0].shape}, Numel: {kv_caches_for_runner[0].numel()}, Dtype: {kv_caches_for_runner[0].dtype}")
-                         if kv_caches_for_runner[0].numel() == 0:
-                             logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] has Numel == 0.")
-                    else:
-                         logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner[0] is None.")
+            # CRITICAL CHANGE: Use self.pipeline_stage_rank instead of worker_input.virtual_engine
+            # Ensure self.pipeline_stage_rank exists and is valid
+            if hasattr(self, 'pipeline_stage_rank') and self.pipeline_stage_rank is not None:
+                if self.pipeline_stage_rank < len(self.kv_cache):
+                    kv_caches_for_runner = self.kv_cache[self.pipeline_stage_rank]
+                    # Optional: Log for the target worker if it's still an issue after this change
+                    # if getattr(self, 'rank', -1) == 1: # If this is worker 1
+                    #     logger.info(
+                    #         f"[WB_EXEC_MODEL_CACHE pid={current_pid_wb} rank={getattr(self, 'rank', 'N/A')}] "
+                    #         f"Using self.pipeline_stage_rank ({self.pipeline_stage_rank}) to get KV Caches. "
+                    #         f"Cache type: {type(kv_caches_for_runner)}, "
+                    #         f"Is None: {kv_caches_for_runner is None}, "
+                    #         f"Len: {len(kv_caches_for_runner) if isinstance(kv_caches_for_runner, list) else 'N/A'}"
+                    #     )
                 else:
-                    logger.error(f"{log_prefix_wb}   CRITICAL: kv_caches_for_runner is not a list or None, but type: {type(kv_caches_for_runner)}.")
+                    logger.error(
+                        f"[WB_EXEC_MODEL_CACHE pid={current_pid_wb} rank={getattr(self, 'rank', 'N/A')}] "
+                        f"self.pipeline_stage_rank ({self.pipeline_stage_rank}) is out of bounds "
+                        f"for self.kv_cache (len {len(self.kv_cache)}). KV cache will be None."
+                    )
             else:
-                logger.error(f"{log_prefix_wb}   CRITICAL: worker_input.virtual_engine index {effective_virtual_engine_idx} is out of bounds for self.kv_cache (len {len(self.kv_cache)}). kv_caches_for_runner will be None.")
-                kv_caches_for_runner = None # Explicitly None if out of bounds
-        else: # self.kv_cache itself is None
-             logger.error(f"{log_prefix_wb}   CRITICAL: self.kv_cache is None. kv_caches_for_runner will be None.")
-             kv_caches_for_runner = None
-        # ======= WORKER_BASE EXECUTE_MODEL DEBUG END =======
+                logger.error(
+                    f"[WB_EXEC_MODEL_CACHE pid={current_pid_wb} rank={getattr(self, 'rank', 'N/A')}] "
+                    f"self.pipeline_stage_rank is not available or None. KV cache will be None."
+                )
+        else:
+            logger.error(
+                f"[WB_EXEC_MODEL_CACHE pid={current_pid_wb} rank={getattr(self, 'rank', 'N/A')}] "
+                f"self.kv_cache itself is None. KV cache will be None."
+            )
+        # --- End of section to determine kv_caches_for_runner ---
 
         output = self.model_runner.execute_model(
             model_input=model_input,
-            kv_caches=kv_caches_for_runner, # Use the logged/inspected variable
+            kv_caches=kv_caches_for_runner,
+            if self.kv_cache is not None else None,
             intermediate_tensors=intermediate_tensors,
             num_steps=num_steps,
             **kwargs,

@@ -1907,17 +1907,10 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
         )
 
         logger.error(
-            f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1 (PID {current_pid}): "
+            f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank PID {current_pid}: "
             f"Inspecting received 'kv_caches' argument (should be List[torch.Tensor] for this stage)."
         )
         if isinstance(kv_caches, list):
-            # Number of layers for worker 1 (rank 1) was 26 from previous logs.
-            expected_layers_for_worker1 = 26 
-            if len(kv_caches) != expected_layers_for_worker1:
-                logger.warning(
-                    f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
-                    f"len(kv_caches) is {len(kv_caches)}, but expected {expected_layers_for_worker1} layers for rank 1."
-                )
             
             for i, layer_cache_tensor in enumerate(kv_caches):
                 if layer_cache_tensor is not None:
