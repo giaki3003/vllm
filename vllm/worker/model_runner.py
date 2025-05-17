@@ -1886,10 +1886,6 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
 
         # ======= MODEL_RUNNER EXECUTE_MODEL DEBUG START (PID: {os.getpid()}) =======
         current_pid = os.getpid()
-        # Assuming PID 10099 is the target rank 1 worker. Adjust if PIDs change.
-        # A more robust way if rank is available: target_rank = 1
-        # is_target_worker = (getattr(self.parallel_config, 'rank', -1) == target_rank)
-        is_target_worker = (current_pid == 10099) 
 
         _is_prefill_check = "N/A"
         _num_decode_tokens_check = "N/A"
@@ -1910,48 +1906,47 @@ class ModelRunner(GPUModelRunnerBase[ModelInputForGPUWithSamplingMetadata]):
             f"kv_caches len: {len(kv_caches) if isinstance(kv_caches, list) else 'N/A'}"
         )
 
-        if is_target_worker: # Log details only for the target worker (rank 1, PID 10099)
-            logger.error(
-                f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1 (PID {current_pid}): "
-                f"Inspecting received 'kv_caches' argument (should be List[torch.Tensor] for this stage)."
-            )
-            if isinstance(kv_caches, list):
-                # Number of layers for worker 1 (rank 1) was 26 from previous logs.
-                expected_layers_for_worker1 = 26 
-                if len(kv_caches) != expected_layers_for_worker1:
-                    logger.warning(
-                        f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
-                        f"len(kv_caches) is {len(kv_caches)}, but expected {expected_layers_for_worker1} layers for rank 1."
+        logger.error(
+            f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1 (PID {current_pid}): "
+            f"Inspecting received 'kv_caches' argument (should be List[torch.Tensor] for this stage)."
+        )
+        if isinstance(kv_caches, list):
+            # Number of layers for worker 1 (rank 1) was 26 from previous logs.
+            expected_layers_for_worker1 = 26 
+            if len(kv_caches) != expected_layers_for_worker1:
+                logger.warning(
+                    f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
+                    f"len(kv_caches) is {len(kv_caches)}, but expected {expected_layers_for_worker1} layers for rank 1."
+                )
+            
+            for i, layer_cache_tensor in enumerate(kv_caches):
+                if layer_cache_tensor is not None:
+                    logger.error(
+                        f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1, kv_caches Layer Index {i}: "
+                        f"Tensor Shape: {layer_cache_tensor.shape}, "
+                        f"Numel: {layer_cache_tensor.numel()}, "
+                        f"Dtype: {layer_cache_tensor.dtype}, Device: {layer_cache_tensor.device}"
                     )
-                
-                for i, layer_cache_tensor in enumerate(kv_caches):
-                    if layer_cache_tensor is not None:
-                        logger.error(
-                            f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1, kv_caches Layer Index {i}: "
-                            f"Tensor Shape: {layer_cache_tensor.shape}, "
-                            f"Numel: {layer_cache_tensor.numel()}, "
-                            f"Dtype: {layer_cache_tensor.dtype}, Device: {layer_cache_tensor.device}"
-                        )
-                        if layer_cache_tensor.numel() == 0:
-                             logger.critical(
-                                f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1, Layer {i}: "
-                                f"CRITICAL - Received empty tensor (numel=0) in kv_caches list!"
-                            )
-                    else:
-                        logger.error(
+                    if layer_cache_tensor.numel() == 0:
+                         logger.critical(
                             f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1, Layer {i}: "
-                            f"kv_cache tensor is None in kv_caches list!"
+                            f"CRITICAL - Received empty tensor (numel=0) in kv_caches list!"
                         )
-            elif kv_caches is None:
-                 logger.critical( # Changed to critical as this is highly problematic
-                    f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
-                    f"CRITICAL - Received 'kv_caches' argument is None."
-                )
-            else:
-                logger.error(
-                    f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
-                    f"Received 'kv_caches' is not a list, type: {type(kv_caches)}"
-                )
+                else:
+                    logger.error(
+                        f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1, Layer {i}: "
+                        f"kv_cache tensor is None in kv_caches list!"
+                    )
+        elif kv_caches is None:
+             logger.critical( # Changed to critical as this is highly problematic
+                f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
+                f"CRITICAL - Received 'kv_caches' argument is None."
+            )
+        else:
+            logger.error(
+                f"[MR_EXEC_MODEL_KV_DEBUG pid={current_pid}] Worker Rank 1: "
+                f"Received 'kv_caches' is not a list, type: {type(kv_caches)}"
+            )
         # ======= MODEL_RUNNER EXECUTE_MODEL DEBUG END =======
 
         if self.lora_config:
