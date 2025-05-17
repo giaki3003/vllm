@@ -837,13 +837,37 @@ class RayDistributedExecutor(DistributedExecutorBase):
     async def execute_model_async(
             self,
             execute_model_req: ExecuteModelRequest) -> List[SamplerOutput]:
+        # This log will show what virtual_engine LLMEngine.step_async set in the request
+        logger.error(
+            f"[RAY_EXEC_ENTRY pid={os.getpid()}] Received execute_model_req with "
+            f"req.virtual_engine: {execute_model_req.virtual_engine}"
+        )
+
         if not self.use_ray_spmd_worker:
+            logger.error(f"[RAY_EXEC_INFO pid={os.getpid()}] use_ray_spmd_worker is False. Calling super().execute_model_async.")
             return await super().execute_model_async(execute_model_req)
 
+        # This path is taken if self.use_ray_spmd_worker is True
+        logger.error(f"[RAY_EXEC_INFO pid={os.getpid()}] use_ray_spmd_worker is True. Using Ray DAG.")
         if self.forward_dag is None:
+            # _compiled_ray_dag() defines how workers in the DAG receive and process data.
+            # This is where the request might be "misinterpreted" or misrouted internally by the DAG
+            # if the DAG structure doesn't properly use the virtual_engine from the serialized request
+            # for each pipeline stage actor.
             self.forward_dag = self._compiled_ray_dag(enable_asyncio=True)
 
+        # Log again right before encoding to ensure no modifications happened if super() was complex
+        # or if there were other preamble steps.
+        logger.error(
+            f"[RAY_EXEC_PRE_ENCODE pid={os.getpid()}] Before encoding, "
+            f"req.virtual_engine: {execute_model_req.virtual_engine}"
+        )
         serialized_data = self.input_encoder.encode(execute_model_req)
+        
+        # The serialized_data (containing the ExecuteModelRequest with its virtual_engine field)
+        # is passed to the Ray DAG. Each Ray actor (worker) in the DAG will deserialize this.
+        # If a worker for pipeline stage 1 deserializes a request that has virtual_engine=0,
+        # it will lead to the error we're seeing.
         dag_future = await self.forward_dag.execute_async(serialized_data)
         output = await dag_future[0]
         return self.output_decoder.decode(output)
