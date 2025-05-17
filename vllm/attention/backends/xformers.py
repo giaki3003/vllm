@@ -354,11 +354,11 @@ class XFormersMetadataBuilder(CommonMetadataBuilder[XFormersMetadata]):
 class XFormersImpl(AttentionImpl[XFormersMetadata]):
     """
     If the input tensors contain prompt tokens, the layout is as follows:
-    |<--------------- num_prefill_tokens ----------------->|	
+    |<--------------- num_prefill_tokens ----------------->|    
     |<--prefill_0-->|<--prefill_1-->|...|<--prefill_N-1--->|
 
-    Otherwise, the layout is as follows:	
-    |<----------------- num_decode_tokens ------------------>|	
+    Otherwise, the layout is as follows:    
+    |<----------------- num_decode_tokens ------------------>|  
     |<--decode_0-->|..........|<--decode_M-1-->|<--padding-->|
 
     Generation tokens can contain padding when cuda-graph is used.
@@ -421,21 +421,6 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 f"Supported head sizes are: {supported_head_sizes}.")
 
         self.attn_type = attn_type
-        # self.tp_rank is not available here, will be set in forward if needed by PagedAttention
-        # For now, assume tp_rank=0 for non-distributed or if PagedAttention handles it.
-        # If PagedAttention.forward_decode truly needs it from here, this needs a rethink.
-        # Based on its signature, it takes tp_rank as an argument.
-        # Let's assume it's passed correctly in the calling context or defaults appropriately.
-        self.tp_rank = 0 # Placeholder, confirm if PagedAttention needs this from here or gets it passed.
-                         # The diff passes self.tp_rank to PagedAttention.forward_decode.
-                         # This implies self.tp_rank should be an attribute.
-                         # It's typically set if distributed_init is done.
-                         # For now, I'll add it as an attribute initialized to 0.
-                         # This might need to be correctly set from parallel_config if available.
-        if torch.distributed.is_initialized():
-             from vllm.distributed import get_tensor_model_parallel_rank
-             self.tp_rank = get_tensor_model_parallel_rank()
-
 
     def forward(
         self,
@@ -443,15 +428,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         query: torch.Tensor,
         key: Optional[torch.Tensor],
         value: Optional[torch.Tensor],
-        kv_cache: Optional[torch.Tensor], # Changed to Optional
+        kv_cache: torch.Tensor,
         attn_metadata: "XFormersMetadata",
-        output: Optional[torch.Tensor] = None, # Not used in the new body
+        output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """Forward pass with xFormers and PagedAttention.
 
-        For decoder-only models: query, key and value must be non-None
-        during prefill. During decode, key and value are not needed as
-        they are already in kv_cache.
+        For decoder-only models: query, key and value must be non-None.
 
         For encoder/decoder models:
         * XFormersImpl.forward() may be invoked for both self- and cross-
@@ -491,17 +474,15 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             value: shape = [num_tokens, num_kv_heads * head_size]
             kv_cache = [2, num_blocks, block_size * num_kv_heads * head_size]
                 NOTE: kv_cache will be an empty tensor with shape [0]
-                for profiling run, or None if not applicable (e.g. non-local stage).
+                for profiling run.
             attn_metadata: Metadata for attention.
-            # attn_type: Select attention type, between encoder attention,
-            #            decoder self-attention, or encoder/decoder cross-
-            #            attention. Defaults to decoder self-attention,
-            #            which is the vLLM default generally
-            # This is now self.attn_type
+            attn_type: Select attention type, between encoder attention,
+                       decoder self-attention, or encoder/decoder cross-
+                       attention. Defaults to decoder self-attention,
+                       which is the vLLM default generally
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
-        # BODY OF FORWARD METHOD (Part 2 - New Content)
         attn_type = self.attn_type
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
@@ -527,12 +508,8 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         # Self-attention vs. cross-attention will impact
         # which KV cache memory-mapping & which
         # seqlen datastructures we utilize
-        
-        # key_cache and value_cache will be populated here if kv_cache is valid
-        key_cache: Optional[torch.Tensor] = None
-        value_cache: Optional[torch.Tensor] = None
 
-        if (attn_type != AttentionType.ENCODER):
+        if (attn_type != AttentionType.ENCODER and kv_cache.numel() > 0):
             # KV-cache during decoder-self- or
             # encoder-decoder-cross-attention, but not
             # during encoder attention.
@@ -540,49 +517,37 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
             # Even if there are no new key/value pairs to cache,
             # we still need to break out key_cache and value_cache
             # i.e. for later use by paged attention
-            # If kv_cache is None (e.g. non-local stage), PagedAttention.split_kv_cache will handle it
-            # (it should raise an AttributeError if kv_cache is None and it tries to access attributes like .element_size() or .shape).
-            # If kv_cache is an empty tensor (e.g. shape (2,0,X) from profiling run), it should also be handled.
-            if kv_cache is not None and kv_cache.numel() > 0 : # Added numel check for safety before splitting
-                key_cache, value_cache = PagedAttention.split_kv_cache(
-                    kv_cache, self.num_kv_heads, self.head_size)
-            # else: key_cache and value_cache remain None if input kv_cache is None or empty.
+            key_cache, value_cache = PagedAttention.split_kv_cache(
+                kv_cache, self.num_kv_heads, self.head_size)
 
-            if (key is not None) and (value is not None): # This is for writing new K/V to cache
-                if key_cache is not None and value_cache is not None: # Can only write if cache tensors exist
-                    if attn_type == AttentionType.ENCODER_DECODER:
-                        # Update cross-attention KV cache (prefill-only)
-                        # During cross-attention decode, key & value will be None,
-                        # preventing this IF-statement branch from running
-                        updated_slot_mapping = attn_metadata.cross_slot_mapping
-                    else:
-                        # Update self-attention KV cache (prefill/decode)
-                        updated_slot_mapping = attn_metadata.slot_mapping
+            if (key is not None) and (value is not None):
 
-                    PagedAttention.write_to_paged_cache(
-                        key, value, key_cache, value_cache, updated_slot_mapping,
-                        self.kv_cache_dtype, layer._k_scale, layer._v_scale)
-                # else:
-                    # Cannot write to cache if key_cache or value_cache is None (e.g. from None input kv_cache or empty kv_cache)
-                    # logger.warning("Skipping write to paged cache as key_cache or value_cache is None.")
+                if attn_type == AttentionType.ENCODER_DECODER:
+                    # Update cross-attention KV cache (prefill-only)
+                    # During cross-attention decode, key & value will be None,
+                    # preventing this IF-statement branch from running
+                    updated_slot_mapping = attn_metadata.cross_slot_mapping
+                else:
+                    # Update self-attention KV cache (prefill/decode)
+                    updated_slot_mapping = attn_metadata.slot_mapping
 
-
+                # Reshape the input keys and values and store them in the cache.
+                # If kv_cache is not provided, the new key and value tensors are
+                # not cached. This happens during the initial memory
+                # profiling run.
+                PagedAttention.write_to_paged_cache(
+                    key, value, key_cache, value_cache, updated_slot_mapping,
+                    self.kv_cache_dtype, layer._k_scale, layer._v_scale)
         (num_prefill_query_tokens, num_prefill_kv_tokens,
         num_decode_query_tokens) = \
             get_num_prefill_decode_query_kv_tokens(attn_metadata, attn_type)
 
-        # output tensor is created with the same shape as query, assuming query is already [num_tokens, num_heads * head_size]
-        # but PagedAttention ops expect query as [num_tokens, num_heads, head_size]
-        # The original query input to this function is [num_tokens, hidden_size]
-        # It's reshaped to [num_tokens, num_heads, head_size]
-        # So, torch.empty_like(query) where query is [num_tokens, num_heads, head_size] is correct for PagedAttention output.
-        output = torch.empty_like(query) # query is already [num_tokens, num_heads, head_size] at this point
-
+        output = torch.empty_like(query)
         # Query for decode. KV is not needed because it is already cached.
         decode_query = query[num_prefill_query_tokens:]
         # QKV for prefill.
         query = query[:num_prefill_query_tokens]
-        if key is not None and value is not None: # key/value are already [num_tokens, num_kv_heads, head_size]
+        if key is not None and value is not None:
             key = key[:num_prefill_kv_tokens]
             value = value[:num_prefill_kv_tokens]
 
@@ -591,19 +556,13 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
 
         if prefill_meta := attn_metadata.prefill_metadata:
             # Prompt run.
-            # Determine if paged attention can be used for prefill
-            use_paged_attn_prefill = (key_cache is not None and value_cache is not None and
-                                      key_cache.numel() > 0 and value_cache.numel() > 0 and
-                                      prefill_meta.block_tables is not None and 
-                                      prefill_meta.block_tables.numel() > 0)
-
-            if not use_paged_attn_prefill:
-                # normal attention / or kv_cache was None or empty, or no block_tables
+            if kv_cache.numel() == 0 or prefill_meta.block_tables.numel() == 0:
+                # normal attention.
+                # block tables are empty if the prompt does not have a cached
+                # prefix.
                 out = self._run_memory_efficient_xformers_forward(
-                    query, key, value, prefill_meta, attn_type=attn_type) # query, key, value here are prefill portions
-                # out shape is [num_prefill_query_tokens, num_heads, head_size]
-                # output[:num_prefill_query_tokens] expects the same
-                assert out.shape == output[:num_prefill_query_tokens].shape 
+                    query, key, value, prefill_meta, attn_type=attn_type)
+                assert out.shape == output[:num_prefill_query_tokens].shape
                 output[:num_prefill_query_tokens] = out
             else:
                 assert attn_type != AttentionType.ENCODER_ONLY, (
@@ -612,13 +571,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 assert prefill_meta.query_start_loc is not None
                 assert prefill_meta.max_query_len is not None
 
+                # prefix-enabled attention
+                # TODO(Hai) this triton kernel has regression issue (broke) to
+                # deal with different data types between KV and FP8 KV cache,
+                # to be addressed separately.
                 out = PagedAttention.forward_prefix(
-                    query, # prefill portion of query
-                    key,   # prefill portion of key
-                    value, # prefill portion of value
+                    query,
+                    key,
+                    value,
                     self.kv_cache_dtype,
-                    key_cache, 
-                    value_cache, 
+                    key_cache,
+                    value_cache,
                     prefill_meta.block_tables,
                     prefill_meta.query_start_loc,
                     prefill_meta.seq_lens_tensor,
@@ -628,7 +591,7 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                     layer._k_scale,
                     layer._v_scale,
                 )
-                assert out.shape == output[:num_prefill_query_tokens].shape
+                assert output[:num_prefill_query_tokens].shape == out.shape
                 output[:num_prefill_query_tokens] = out
 
         if decode_meta := attn_metadata.decode_metadata:
@@ -640,18 +603,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 max_seq_len_arg,
                 block_tables_arg,
             ) = get_seq_len_block_table_args(decode_meta, False, attn_type)
-            
-            if key_cache is None or value_cache is None:
-                raise RuntimeError(
-                    "key_cache or value_cache is None in decode phase. "
-                    "Input kv_cache might have been None/empty or an unexpected attention type for decode.")
 
-            # decode_query is already [num_decode_tokens, num_heads, head_size]
-            # PagedAttention.forward_decode expects query of this shape.
             output[num_prefill_query_tokens:] = PagedAttention.forward_decode(
-                decode_query, 
-                key_cache, 
-                value_cache, 
+                decode_query,
+                key_cache,
+                value_cache,
                 block_tables_arg,
                 seq_lens_arg,
                 max_seq_len_arg,
@@ -661,20 +617,11 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
                 self.alibi_slopes,
                 layer._k_scale,
                 layer._v_scale,
-                self.tp_rank, # Use self.tp_rank here
-                0,  # blocksparse_local_blocks default
-                0,  # blocksparse_vert_stride default
-                64, # blocksparse_block_size default
-                0,  # blocksparse_head_sliding_step default
             )
-        # Reshape the output tensor back to [total_tokens, hidden_size]
-        # Original query input to this function was [total_tokens, hidden_size]
-        # The internal query was reshaped to [total_tokens, num_heads, head_size]
-        # Output from PagedAttention ops is [total_tokens, num_heads, head_size]
-        # So, view it back to [total_tokens, num_heads * head_size]
+
+        # Reshape the output tensor.
         return output.view(-1, self.num_heads * self.head_size)
 
-# CONTENT AFTER FORWARD METHOD (Part 3)
     def _run_memory_efficient_xformers_forward(
         self,
         query: torch.Tensor,
