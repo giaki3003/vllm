@@ -383,7 +383,7 @@ def unified_attention(
 
     # Get context and the 'self' module (which is an attention layer instance)
     # Ensure get_current_forward_context() and ForwardContext are correctly defined/imported
-    forward_context: Optional[ForwardContext] = get_current_forward_context()
+    forward_context: Optional[ForwardContext] = get_forward_context()
     
     if forward_context is None:
         logger.error(f"[UNIFIED_ATTN_DEBUG pid={current_pid}] Layer {layer_name}: ForwardContext is None! Cannot proceed.")
