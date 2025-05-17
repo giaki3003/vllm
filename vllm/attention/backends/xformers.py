@@ -483,6 +483,17 @@ class XFormersImpl(AttentionImpl[XFormersMetadata]):
         Returns:
             shape = [num_tokens, num_heads * head_size]
         """
+    # ======= TEMPORARY DEBUG LOGS START =======
+        try:
+            effective_attn_type = self.attn_type
+            logger.error(f"[XFORMERS_FORWARD_DEBUG] self.attn_type: {effective_attn_type}, "
+                         f"kv_cache.numel(): {kv_cache.numel() if kv_cache is not None else 'None'}, "
+                         f"is_prefill: {attn_metadata.num_prefills > 0}, "
+                         f"num_prefill_tokens: {attn_metadata.num_prefill_tokens}, "
+                         f"block_tables.numel(): {attn_metadata.block_tables.numel() if attn_metadata.block_tables is not None else 'None'}")
+        except Exception as e:
+            logger.error(f"[XFORMERS_FORWARD_DEBUG] Error in debug log: {e}")
+        # ======= TEMPORARY DEBUG LOGS END =======
         attn_type = self.attn_type
         # Check that appropriate attention metadata attributes are
         # selected for the desired attention type
